@@ -20,6 +20,7 @@ import time
 import traceback
 import _thread
 import typing
+import lz4.frame
 
 from libc.stdint cimport (
     int32_t,
@@ -1301,7 +1302,7 @@ cdef class CoreWorker:
 
     def put_file_like_object(
             self, metadata, data_size, file_like, ObjectRef object_ref,
-            owner_address):
+            owner_address, compressed_size = -1):
         """Directly create a new Plasma Store object from a file like
         object. This avoids extra memory copy.
 
@@ -1338,9 +1339,19 @@ cdef class CoreWorker:
         data = Buffer.make(data_buf)
         view = memoryview(data)
         index = 0
-        while index < data_size:
-            bytes_read = file_like.readinto(view[index:])
-            index += bytes_read
+        if compressed_size > 0:
+            # TODO: use chunk based to save memory
+            compressed_view = bytearray(compressed_size)
+            while index < compressed_size:
+                bytes_read = file_like.readinto(compressed_view[index:])
+                index += bytes_read
+
+            # Compress the data into the buffer
+            view = lz4.frame.decompress(compressed_view)
+        else:
+            while index < data_size:
+                bytes_read = file_like.readinto(view[index:])
+                index += bytes_read
         with nogil:
             # Using custom object refs is not supported because we
             # can't track their lifecycle, so we don't pin the object

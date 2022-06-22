@@ -15,6 +15,10 @@ from ray._raylet import ObjectRef
 ParsedURL = namedtuple("ParsedURL", "base_url, offset, size")
 logger = logging.getLogger(__name__)
 
+WITH_COMPRESSION = False
+if WITH_COMPRESSION:
+    import lz4.frame
+
 
 def create_url_with_offset(*, url: str, offset: int, size: int) -> str:
     """Methods to create a URL with offset.
@@ -96,12 +100,55 @@ class ExternalStorage(metaclass=abc.ABCMeta):
         return ray_object_pairs
 
     def _put_object_to_store(
-        self, metadata, data_size, file_like, object_ref, owner_address
+        self,
+        metadata,
+        data_size,
+        file_like,
+        object_ref,
+        owner_address,
+        compressed_size=-1,
     ):
         worker = ray._private.worker.global_worker
         worker.core_worker.put_file_like_object(
-            metadata, data_size, file_like, object_ref, owner_address
+            metadata, data_size, file_like, object_ref, owner_address, compressed_size
         )
+
+    def _get_payload(
+        self, address_len, metadata_len, buf_len, owner_address, metadata, buf
+    ):
+        if WITH_COMPRESSION:
+            compressed = lz4.frame.compress(buf) if buf_len else b""
+            compressed_len = len(compressed)
+            payload = (
+                address_len.to_bytes(8, byteorder="little")
+                + metadata_len.to_bytes(8, byteorder="little")
+                + buf_len.to_bytes(8, byteorder="little")
+                + compressed_len.bytes(8, byteorder="little")
+                + owner_address
+                + metadata
+                + (memoryview(compressed))
+            )
+            # 24 bytes to store owner address, metadata, and buffer lengths.
+            payload_len = len(payload)
+            assert (
+                self.HEADER_LENGTH + 8 + address_len + metadata_len + buf_len
+                == payload_len
+            )
+        else:
+            payload = (
+                address_len.to_bytes(8, byteorder="little")
+                + metadata_len.to_bytes(8, byteorder="little")
+                + buf_len.to_bytes(8, byteorder="little")
+                + owner_address
+                + metadata
+                + (memoryview(buf) if buf_len else b"")
+            )
+            # 24 bytes to store owner address, metadata, and buffer lengths.
+            payload_len = len(payload)
+            assert (
+                self.HEADER_LENGTH + address_len + metadata_len + buf_len == payload_len
+            )
+        return payload
 
     def _write_multiple_objects(
         self, f: IO, object_refs: List[ObjectRef], owner_addresses: List[str], url: str
@@ -132,21 +179,11 @@ class ExternalStorage(metaclass=abc.ABCMeta):
                 error = f"Object {ref.hex()} does not exist."
                 raise ValueError(error)
             buf_len = 0 if buf is None else len(buf)
-            payload = (
-                address_len.to_bytes(8, byteorder="little")
-                + metadata_len.to_bytes(8, byteorder="little")
-                + buf_len.to_bytes(8, byteorder="little")
-                + owner_address
-                + metadata
-                + (memoryview(buf) if buf_len else b"")
-            )
-            # 24 bytes to store owner address, metadata, and buffer lengths.
-            payload_len = len(payload)
-            assert (
-                self.HEADER_LENGTH + address_len + metadata_len + buf_len == payload_len
+            payload = self._get_payload(
+                address_len, metadata_len, buf_len, owner_address, metadata, buf
             )
             written_bytes = f.write(payload)
-            assert written_bytes == payload_len
+            assert written_bytes == len(payload)
             url_with_offset = create_url_with_offset(
                 url=url, offset=offset, size=written_bytes
             )
@@ -171,7 +208,9 @@ class ExternalStorage(metaclass=abc.ABCMeta):
             24 (first 8 bytes to store length).
         """
         data_size_in_bytes = (
-            address_len + metadata_len + buffer_len + self.HEADER_LENGTH
+            address_len + metadata_len + buffer_len + self.HEADER_LENGTH + 8
+            if WITH_COMPRESSION
+            else 0
         )
         if data_size_in_bytes != obtained_data_size:
             raise ValueError(
@@ -319,13 +358,23 @@ class FileSystemStorage(ExternalStorage):
                 address_len = int.from_bytes(f.read(8), byteorder="little")
                 metadata_len = int.from_bytes(f.read(8), byteorder="little")
                 buf_len = int.from_bytes(f.read(8), byteorder="little")
-                self._size_check(address_len, metadata_len, buf_len, parsed_result.size)
+                compressed_len = (
+                    int.from_bytes(f.read(8), byteorder="little")
+                    if WITH_COMPRESSION
+                    else -1
+                )
+                self._size_check(
+                    address_len,
+                    metadata_len,
+                    buf_len if not WITH_COMPRESSION else compressed_len,
+                    parsed_result.size,
+                )
                 total += buf_len
                 owner_address = f.read(address_len)
                 metadata = f.read(metadata_len)
                 # read remaining data to our buffer
                 self._put_object_to_store(
-                    metadata, buf_len, f, object_ref, owner_address
+                    metadata, buf_len, f, object_ref, owner_address, compressed_len
                 )
         return total
 
