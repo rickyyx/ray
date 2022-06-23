@@ -21,6 +21,8 @@ import traceback
 import _thread
 import typing
 import lz4.frame
+import zstandard as zstd 
+ctx = zstd.ZstdDecompressor()
 
 from libc.stdint cimport (
     int32_t,
@@ -1343,7 +1345,8 @@ cdef class CoreWorker:
             # TODO: use chunk based to save memory
             compressed_data = file_like.read(compressed_size)
             # Compress the data into the buffer
-            view[:] = lz4.frame.decompress(compressed_data)
+            # view[:] = lz4.frame.decompress(compressed_data)
+            view[:] = ctx.decompress(compressed_data)
         else:
             while index < data_size:
                 bytes_read = file_like.readinto(view[index:])

@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 WITH_COMPRESSION = True
 if WITH_COMPRESSION:
     import lz4.frame
+    import zstandard as zstd
+
+    cctx = zstd.ZstdCompressor()
 
 
 def create_url_with_offset(*, url: str, offset: int, size: int) -> str:
@@ -117,7 +120,8 @@ class ExternalStorage(metaclass=abc.ABCMeta):
         self, address_len, metadata_len, buf_len, owner_address, metadata, buf
     ):
         if WITH_COMPRESSION:
-            compressed = lz4.frame.compress(buf) if buf_len else b""
+            # compressed = lz4.frame.compress(buf) if buf_len else b""
+            compressed = cctx.compress(buf) if buf_len else b""
             compressed_len = len(compressed)
             payload = (
                 address_len.to_bytes(8, byteorder="little")
