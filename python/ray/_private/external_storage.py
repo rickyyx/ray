@@ -15,7 +15,7 @@ from ray._raylet import ObjectRef
 ParsedURL = namedtuple("ParsedURL", "base_url, offset, size")
 logger = logging.getLogger(__name__)
 
-WITH_COMPRESSION = False
+WITH_COMPRESSION = True
 if WITH_COMPRESSION:
     import lz4.frame
 
@@ -123,15 +123,15 @@ class ExternalStorage(metaclass=abc.ABCMeta):
                 address_len.to_bytes(8, byteorder="little")
                 + metadata_len.to_bytes(8, byteorder="little")
                 + buf_len.to_bytes(8, byteorder="little")
-                + compressed_len.bytes(8, byteorder="little")
+                + compressed_len.to_bytes(8, byteorder="little")
                 + owner_address
                 + metadata
-                + (memoryview(compressed))
+                + compressed
             )
             # 24 bytes to store owner address, metadata, and buffer lengths.
             payload_len = len(payload)
             assert (
-                self.HEADER_LENGTH + 8 + address_len + metadata_len + buf_len
+                self.HEADER_LENGTH + 8 + address_len + metadata_len + compressed_len
                 == payload_len
             )
         else:
@@ -208,9 +208,11 @@ class ExternalStorage(metaclass=abc.ABCMeta):
             24 (first 8 bytes to store length).
         """
         data_size_in_bytes = (
-            address_len + metadata_len + buffer_len + self.HEADER_LENGTH + 8
-            if WITH_COMPRESSION
-            else 0
+            address_len
+            + metadata_len
+            + buffer_len
+            + self.HEADER_LENGTH
+            + (8 if WITH_COMPRESSION else 0)
         )
         if data_size_in_bytes != obtained_data_size:
             raise ValueError(
@@ -358,24 +360,35 @@ class FileSystemStorage(ExternalStorage):
                 address_len = int.from_bytes(f.read(8), byteorder="little")
                 metadata_len = int.from_bytes(f.read(8), byteorder="little")
                 buf_len = int.from_bytes(f.read(8), byteorder="little")
-                compressed_len = (
-                    int.from_bytes(f.read(8), byteorder="little")
-                    if WITH_COMPRESSION
-                    else -1
-                )
-                self._size_check(
-                    address_len,
-                    metadata_len,
-                    buf_len if not WITH_COMPRESSION else compressed_len,
-                    parsed_result.size,
-                )
-                total += buf_len
-                owner_address = f.read(address_len)
-                metadata = f.read(metadata_len)
-                # read remaining data to our buffer
-                self._put_object_to_store(
-                    metadata, buf_len, f, object_ref, owner_address, compressed_len
-                )
+                if WITH_COMPRESSION:
+                    compressed_len = int.from_bytes(f.read(8), byteorder="little")
+                    self._size_check(
+                        address_len,
+                        metadata_len,
+                        compressed_len,
+                        parsed_result.size,
+                    )
+                    total += buf_len
+                    owner_address = f.read(address_len)
+                    metadata = f.read(metadata_len)
+                    # read remaining data to our buffer
+                    self._put_object_to_store(
+                        metadata, buf_len, f, object_ref, owner_address, compressed_len
+                    )
+                else:
+                    self._size_check(
+                        address_len,
+                        metadata_len,
+                        buf_len,
+                        parsed_result.size,
+                    )
+                    total += buf_len
+                    owner_address = f.read(address_len)
+                    metadata = f.read(metadata_len)
+                    # read remaining data to our buffer
+                    self._put_object_to_store(
+                        metadata, buf_len, f, object_ref, owner_address
+                    )
         return total
 
     def delete_spilled_objects(self, urls: List[str]):

@@ -1341,13 +1341,9 @@ cdef class CoreWorker:
         index = 0
         if compressed_size > 0:
             # TODO: use chunk based to save memory
-            compressed_view = bytearray(compressed_size)
-            while index < compressed_size:
-                bytes_read = file_like.readinto(compressed_view[index:])
-                index += bytes_read
-
+            compressed_data = file_like.read(compressed_size)
             # Compress the data into the buffer
-            view = lz4.frame.decompress(compressed_view)
+            view[:] = lz4.frame.decompress(compressed_data)
         else:
             while index < data_size:
                 bytes_read = file_like.readinto(view[index:])
