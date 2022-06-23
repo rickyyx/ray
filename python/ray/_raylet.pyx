@@ -1304,7 +1304,7 @@ cdef class CoreWorker:
 
     def put_file_like_object(
             self, metadata, data_size, file_like, ObjectRef object_ref,
-            owner_address, compressed_size = -1):
+            owner_address):
         """Directly create a new Plasma Store object from a file like
         object. This avoids extra memory copy.
 
@@ -1341,16 +1341,9 @@ cdef class CoreWorker:
         data = Buffer.make(data_buf)
         view = memoryview(data)
         index = 0
-        if compressed_size > 0:
-            # TODO: use chunk based to save memory
-            compressed_data = file_like.read(compressed_size)
-            # Compress the data into the buffer
-            # view[:] = lz4.frame.decompress(compressed_data)
-            view[:] = ctx.decompress(compressed_data)
-        else:
-            while index < data_size:
-                bytes_read = file_like.readinto(view[index:])
-                index += bytes_read
+        while index < data_size:
+            bytes_read = file_like.readinto(view[index:])
+            index += bytes_read
         with nogil:
             # Using custom object refs is not supported because we
             # can't track their lifecycle, so we don't pin the object

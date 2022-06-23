@@ -1,5 +1,6 @@
 import abc
 import logging
+import lz4.frame
 import os
 import random
 import shutil
@@ -14,13 +15,6 @@ from ray._raylet import ObjectRef
 
 ParsedURL = namedtuple("ParsedURL", "base_url, offset, size")
 logger = logging.getLogger(__name__)
-
-WITH_COMPRESSION = True
-if WITH_COMPRESSION:
-    import lz4.frame
-    import zstandard as zstd
-
-    cctx = zstd.ZstdCompressor()
 
 
 def create_url_with_offset(*, url: str, offset: int, size: int) -> str:
@@ -109,50 +103,48 @@ class ExternalStorage(metaclass=abc.ABCMeta):
         file_like,
         object_ref,
         owner_address,
-        compressed_size=-1,
     ):
         worker = ray._private.worker.global_worker
         worker.core_worker.put_file_like_object(
-            metadata, data_size, file_like, object_ref, owner_address, compressed_size
+            metadata, data_size, file_like, object_ref, owner_address
         )
 
-    def _get_payload(
-        self, address_len, metadata_len, buf_len, owner_address, metadata, buf
-    ):
-        if WITH_COMPRESSION:
-            # compressed = lz4.frame.compress(buf) if buf_len else b""
-            compressed = cctx.compress(buf) if buf_len else b""
-            compressed_len = len(compressed)
-            payload = (
-                address_len.to_bytes(8, byteorder="little")
-                + metadata_len.to_bytes(8, byteorder="little")
-                + buf_len.to_bytes(8, byteorder="little")
-                + compressed_len.to_bytes(8, byteorder="little")
-                + owner_address
-                + metadata
-                + compressed
-            )
-            # 24 bytes to store owner address, metadata, and buffer lengths.
-            payload_len = len(payload)
-            assert (
-                self.HEADER_LENGTH + 8 + address_len + metadata_len + compressed_len
-                == payload_len
-            )
-        else:
-            payload = (
-                address_len.to_bytes(8, byteorder="little")
-                + metadata_len.to_bytes(8, byteorder="little")
-                + buf_len.to_bytes(8, byteorder="little")
-                + owner_address
-                + metadata
-                + (memoryview(buf) if buf_len else b"")
-            )
-            # 24 bytes to store owner address, metadata, and buffer lengths.
-            payload_len = len(payload)
-            assert (
-                self.HEADER_LENGTH + address_len + metadata_len + buf_len == payload_len
-            )
-        return payload
+    def _write_header(
+        self, f: IO, address_len: int, metadata_len: int, buf_len: int
+    ) -> int:
+        header_data = (
+            address_len.to_bytes(8, byteorder="little")
+            + metadata_len.to_bytes(8, byteorder="little")
+            + buf_len.to_bytes(8, byteorder="little")
+        )
+
+        num_bytes = f.write(header_data)
+        assert num_bytes == self.HEADER_LENGTH
+        return num_bytes
+
+    def _write_data(self, f: IO, owner_address: str, metadata: str, buf: bytes) -> int:
+        data = owner_address + metadata + memoryview(buf) if len(buf) else b""
+
+        num_bytes = f.write(data)
+        assert num_bytes == len(owner_address) + len(metadata) + len(buf)
+        return num_bytes
+
+    def _write_data_lz4(
+        self, f: IO, owner_address: str, metadata: str, buf: bytes
+    ) -> int:
+        def write_n(f, data, n):
+            written = f.write(data)
+            assert written == n
+
+        start = f.tell()
+        write_n(f, owner_address, len(owner_address))
+        write_n(f, metadata, len(metadata))
+        cf = lz4.frame.LZ4FrameFile(f, mode="wb")
+        write_n(cf, buf, len(buf))
+        # This will flush the underlying file stream as well.
+        cf.flush()
+        # Total size of payloads after compression
+        return f.tell() - start
 
     def _write_multiple_objects(
         self, f: IO, object_refs: List[ObjectRef], owner_addresses: List[str], url: str
@@ -183,11 +175,13 @@ class ExternalStorage(metaclass=abc.ABCMeta):
                 error = f"Object {ref.hex()} does not exist."
                 raise ValueError(error)
             buf_len = 0 if buf is None else len(buf)
-            payload = self._get_payload(
-                address_len, metadata_len, buf_len, owner_address, metadata, buf
-            )
-            written_bytes = f.write(payload)
-            assert written_bytes == len(payload)
+
+            header_bytes = self._write_header(f, address_len, metadata_len, buf_len)
+            if self.with_compression():
+                payload_bytes = self._write_data_lz4(f, owner_address, metadata, buf)
+            else:
+                payload_bytes = self._write_data(f, owner_address, metadata, buf)
+            written_bytes = header_bytes + payload_bytes
             url_with_offset = create_url_with_offset(
                 url=url, offset=offset, size=written_bytes
             )
@@ -212,11 +206,7 @@ class ExternalStorage(metaclass=abc.ABCMeta):
             24 (first 8 bytes to store length).
         """
         data_size_in_bytes = (
-            address_len
-            + metadata_len
-            + buffer_len
-            + self.HEADER_LENGTH
-            + (8 if WITH_COMPRESSION else 0)
+            address_len + metadata_len + buffer_len + self.HEADER_LENGTH
         )
         if data_size_in_bytes != obtained_data_size:
             raise ValueError(
@@ -224,6 +214,9 @@ class ExternalStorage(metaclass=abc.ABCMeta):
                 "although it is supposed to have the "
                 f"size of {obtained_data_size}."
             )
+
+    def with_compression(self) -> bool:
+        return False
 
     @abc.abstractmethod
     def spill_objects(self, object_refs, owner_addresses) -> List[str]:
@@ -292,7 +285,7 @@ class FileSystemStorage(ExternalStorage):
             spill objects doesn't exist.
     """
 
-    def __init__(self, directory_path, buffer_size=None):
+    def __init__(self, directory_path, buffer_size=None, with_compression=False):
         # -- sub directory name --
         self._spill_dir_name = DEFAULT_OBJECT_PREFIX
         # -- A list of directory paths to spill objects --
@@ -301,6 +294,8 @@ class FileSystemStorage(ExternalStorage):
         self._current_directory_index = 0
         # -- File buffer size to spill objects --
         self._buffer_size = -1
+
+        self._with_compression = with_compression
 
         # Validation.
         assert (
@@ -330,6 +325,9 @@ class FileSystemStorage(ExternalStorage):
         # It chooses a random index to maximize multiple directories that are
         # mounted at different point.
         self._current_directory_index = random.randrange(0, len(self._directory_paths))
+
+    def with_compression(self) -> bool:
+        return self._with_compression
 
     def spill_objects(self, object_refs, owner_addresses) -> List[str]:
         if len(object_refs) == 0:
@@ -364,35 +362,28 @@ class FileSystemStorage(ExternalStorage):
                 address_len = int.from_bytes(f.read(8), byteorder="little")
                 metadata_len = int.from_bytes(f.read(8), byteorder="little")
                 buf_len = int.from_bytes(f.read(8), byteorder="little")
-                if WITH_COMPRESSION:
-                    compressed_len = int.from_bytes(f.read(8), byteorder="little")
-                    self._size_check(
-                        address_len,
-                        metadata_len,
-                        compressed_len,
-                        parsed_result.size,
-                    )
-                    total += buf_len
-                    owner_address = f.read(address_len)
-                    metadata = f.read(metadata_len)
-                    # read remaining data to our buffer
-                    self._put_object_to_store(
-                        metadata, buf_len, f, object_ref, owner_address, compressed_len
-                    )
-                else:
+                if not self.with_compression():
+                    # We don't really know the compressed data size for now
                     self._size_check(
                         address_len,
                         metadata_len,
                         buf_len,
                         parsed_result.size,
                     )
-                    total += buf_len
-                    owner_address = f.read(address_len)
-                    metadata = f.read(metadata_len)
-                    # read remaining data to our buffer
-                    self._put_object_to_store(
-                        metadata, buf_len, f, object_ref, owner_address
-                    )
+                total += buf_len
+                owner_address = f.read(address_len)
+                metadata = f.read(metadata_len)
+                # read remaining data to our buffer
+                if self.with_compression():
+                    f = lz4.frame.LZ4FrameFile(f, mode="rb")
+
+                self._put_object_to_store(
+                    metadata,
+                    buf_len,
+                    f,
+                    object_ref,
+                    owner_address,
+                )
         return total
 
     def delete_spilled_objects(self, urls: List[str]):
