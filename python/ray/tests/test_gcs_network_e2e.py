@@ -8,33 +8,33 @@ from pytest_docker_tools import wrappers
 from http.client import HTTPConnection
 
 
-# class Container(wrappers.Container):
-#     def ready(self):
-#         self._container.reload()
-#         if self.status == "exited":
-#             from pytest_docker_tools.exceptions import ContainerFailed
-# 
-#             raise ContainerFailed(
-#                 self,
-#                 f"Container {self.name} has already exited before "
-#                 "we noticed it was ready",
-#             )
-# 
-#         if self.status != "running":
-#             return False
-# 
-#         networks = self._container.attrs["NetworkSettings"]["Networks"]
-#         for (_, n) in networks.items():
-#             if not n["IPAddress"]:
-#                 return False
-# 
-#         if "Ray runtime started" in super().logs():
-#             return True
-#         return False
-# 
-#     def client(self):
-#         port = self.ports["8000/tcp"][0]
-#         return HTTPConnection(f"localhost:{port}")
+class Container(wrappers.Container):
+    def ready(self):
+        self._container.reload()
+        if self.status == "exited":
+            from pytest_docker_tools.exceptions import ContainerFailed
+
+            raise ContainerFailed(
+                self,
+                f"Container {self.name} has already exited before "
+                "we noticed it was ready",
+            )
+
+        if self.status != "running":
+            return False
+
+        networks = self._container.attrs["NetworkSettings"]["Networks"]
+        for (_, n) in networks.items():
+            if not n["IPAddress"]:
+                return False
+
+        if "Ray runtime started" in super().logs():
+            return True
+        return False
+
+    def client(self):
+        port = self.ports["8000/tcp"][0]
+        return HTTPConnection(f"localhost:{port}")
 
 
 gcs_network = network(driver="bridge")
