@@ -4,6 +4,7 @@ import threading
 from time import sleep
 
 from pytest_docker_tools import container, fetch, network
+from pytest_docker_tools.exceptions import ContainerFailed
 from pytest_docker_tools import wrappers
 from http.client import HTTPConnection
 
@@ -12,13 +13,12 @@ class Container(wrappers.Container):
     def ready(self):
         self._container.reload()
         if self.status == "exited":
-            from pytest_docker_tools.exceptions import ContainerFailed
-
-            raise ContainerFailed(
-                self,
-                f"Container {self.name} has already exited before "
-                "we noticed it was ready",
-            )
+            return True
+            # raise ContainerFailed(
+            #     self,
+            #     f"Container {self.name} has already exited before "
+            #     "we noticed it was ready",
+            # )
 
         if self.status != "running":
             return False
@@ -37,154 +37,312 @@ class Container(wrappers.Container):
         return HTTPConnection(f"localhost:{port}")
 
 
-gcs_network = network(driver="bridge")
-
-redis_image = fetch(repository="redis:latest")
-
-redis = container(
-    image="{redis_image.id}",
-    network="{gcs_network.name}",
-    command=(
-        "redis-server --save 60 1 --loglevel" " warning --requirepass 5241590000000000"
-    ),
+# Networks
+network_zero = network(
+    name="network_zero",
+    driver="bridge",
+    internal=True,
+    options={
+        "com.docker.network.bridge.name": "net0",
+    },
 )
-
-header_node = container(
-    image="ray_ci:v1",
-    name="gcs",
-    network="{gcs_network.name}",
-    command=["ray", "start", "--head", "--block", "--num-cpus", "0"],
-    environment={"RAY_REDIS_ADDRESS": "{redis.ips.primary}:6379"},
-    wrapper_class=Container,
-    ports={
-        "8000/tcp": None,
+network_one = network(
+    name="network_one",
+    driver="bridge",
+    internal=True,
+    options={
+        "com.docker.network.bridge.name": "net1",
     },
 )
 
-worker_node = container(
-    image="ray_ci:v1",
-    network="{gcs_network.name}",
-    command=["ray", "start", "--address", "gcs:6379", "--block"],
-    environment={"RAY_REDIS_ADDRESS": "{redis.ips.primary}:6379"},
-    wrapper_class=Container,
-    ports={
-        "8000/tcp": None,
+network_two = network(
+    name="network_two",
+    driver="bridge",
+    internal=True,
+    options={
+        "com.docker.network.bridge.name": "net2",
     },
 )
 
 
 @pytest.fixture
-def docker_cluster(header_node, worker_node):
-    yield (header_node, worker_node)
+def head(header_node):
+    yield header_node
 
 
-scripts = """
+driver_script = """
 import ray
-import json
-from fastapi import FastAPI
-app = FastAPI()
-from ray import serve
-ray.init(address="auto", namespace="g")
+ray.init()
 
-@serve.deployment(name="Counter", route_prefix="/api", version="v1")
-@serve.ingress(app)
-class Counter:
-    def __init__(self):
-        self.count = 0
+@ray.remote
+def remote_fn():
+    return 1
 
-    @app.get("/")
-    def get(self):
-        return {{"count": self.count}}
+obj_ref = remote_fn.remote()
 
-    @app.get("/incr")
-    def incr(self):
-        self.count += 1
-        return {{"count": self.count}}
-
-    @app.get("/decr")
-    def decr(self):
-        self.count -= 1
-        return {{"count": self.count}}
-
-    @app.get("/pid")
-    def pid(self):
-        import os
-        return {{"pid": os.getpid()}}
-
-serve.start(detached=True, dedicated_cpu=True)
-
-Counter.options(num_replicas={num_replicas}).deploy()
+assert ray.get(obj_ref) == 1
 """
 
-check_script = """
-import requests
-import json
-if {num_replicas} == 1:
-    b = json.loads(requests.get("http://127.0.0.1:8000/api/").text)["count"]
-    for i in range(5):
-        response = requests.get("http://127.0.0.1:8000/api/incr")
-        assert json.loads(response.text) == {{"count": i + b + 1}}
-
-pids = {{
-    json.loads(requests.get("http://127.0.0.1:8000/api/pid").text)["pid"]
-    for _ in range(5)
-}}
-
-print(pids)
-assert len(pids) == {num_replicas}
+worker_script = """
+import ray
 """
+
+
+worker_node = container(
+    image="ray_ci:v1",
+    network="{network_one.name}",
+    environment={"RAY_GCS_KV_GET_MAX_RETRY": "1"},
+    # command="ray start --address gcs:6379".split(" "),
+    command=["ls", "&&", "tail", "-f", "/dev/null"],
+    ports={
+        "8000/tcp": None,
+    },
+    detach=True,
+)
+
+
+@pytest.fixture
+def worker(worker_node):
+    yield worker_node
+
+
+net_script = """
+import psutil
+import pprint
+
+pprint.pprint(psutil.net_if_addrs())
+
+"""
+
+
+def node(docker_client, networks, **kwargs):
+    init_network = networks[0]
+    container = docker_client.containers.run(
+        image="ray_ci:v1",
+        network=init_network.name,
+        ports={
+            "8000/tcp": None,
+        },
+        detach=True,
+        environment={"RAY_GCS_KV_GET_MAX_RETRY": "1"},
+        command="tail -f /dev/null",
+        **kwargs,
+    )
+
+    if len(networks) >= 1:
+        for net in networks[1:]:
+            net.connect(container)
+
+        container.restart()
+        container.reload()
+
+    return container
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Only works on linux.")
-def test_ray_server_basic(docker_cluster):
-    # This test covers the basic cases for gcs ha (serve ha)
-    # - It starts the serve on worker nodes.
-    # - Check the deployment is OK
-    # - Stop headnode
-    # - Check the serve app is running healthy
-    # - Start a reconfig (2 replicas) and it'll hang
-    # - Start head node. The script will continue once GCS is back
-    # - Make sure two replicas are there
+def test_connected_network_ok(docker_client, network_zero):
+    gcs_node = None
+    worker_node = None
+    try:
+        gcs_node = node(docker_client, [network_zero], name="gcs")
+        worker_node = node(docker_client, [network_zero])
 
-    # TODO(iycheng): Update serve to better integrate with GCS HA:
-    #   - Make sure no task can run in the raylet where GCS is deployed.
+        # Run GCS node
+        exit_code, output = gcs_node.exec_run(cmd="ray start --head")
+        assert exit_code == 0, f"GCS failed to run: {output.decode()}"
 
-    header, worker = docker_cluster
-    output = worker.exec_run(cmd=f"python -c '{scripts.format(num_replicas=1)}'")
-    assert output.exit_code == 0
-    assert b"Adding 1 replicas to deployment 'Counter'." in output.output
-    # somehow this is not working and the port is not exposed to the host.
-    # worker_cli = worker.client()
-    # print(worker_cli.request("GET", "/api/incr"))
+        # Run Worker node
+        exit_code, output = worker_node.exec_run(cmd="ray start --address gcs:6379")
+        assert exit_code == 0, f"Worker failed to run: {output.decode()}"
 
-    output = worker.exec_run(cmd=f"python -c '{check_script.format(num_replicas=1)}'")
+    finally:
+        if gcs_node is not None:
+            gcs_node.remove(force=True)
+        if worker_node is not None:
+            worker_node.remove(force=True)
 
-    assert output.exit_code == 0
 
-    # Kill the head node
-    header.kill()
+@pytest.mark.skipif(sys.platform != "linux", reason="Only works on linux.")
+def test_disconnected_network_fail(docker_client, network_zero, network_one):
+    gcs_node = None
+    worker_node = None
+    try:
+        gcs_node = node(docker_client, [network_zero], name="gcs")
+        worker_node = node(docker_client, [network_one])
 
-    # Make sure serve is still working
-    output = worker.exec_run(cmd=f"python -c '{check_script.format(num_replicas=1)}'")
-    assert output.exit_code == 0
+        # Run GCS node
+        exit_code, output = gcs_node.exec_run(cmd="ray start --head")
+        assert exit_code == 0, f"GCS failed to run: {output.decode()}"
 
-    # Script is running on another thread so that it won't block the main thread.
-    def reconfig():
-        worker.exec_run(cmd=f"python -c '{scripts.format(num_replicas=2)}'")
+        # Run Worker node should fail to connect to GCS
+        exit_code, output = worker_node.exec_run(cmd="ray start --address gcs:6379")
+        assert exit_code != 0, f"Worker should error: {output.decode()}"
+        assert "Unable to connect to GCS" in output.decode(), output.decode()
 
-    t = threading.Thread(target=reconfig)
-    t.start()
+    finally:
+        if gcs_node is not None:
+            gcs_node.remove(force=True)
+        if worker_node is not None:
+            worker_node.remove(force=True)
 
-    # make sure the script started
-    sleep(5)
 
-    # serve reconfig should continue once GCS is back
-    header.restart()
+@pytest.mark.skipif(sys.platform != "linux", reason="Only works on linux.")
+def test_worker_multi_network_auto_select_ok(
+    docker_client, network_zero, network_one, network_two
+):
+    gcs_node = None
+    worker_node = None
+    try:
+        gcs_node = node(docker_client, [network_zero], name="gcs")
+        worker_node = node(docker_client, [network_one, network_zero, network_two])
 
-    t.join()
+        # Run GCS node
+        exit_code, output = gcs_node.exec_run(cmd="ray start --head")
+        assert exit_code == 0, f"GCS failed to run: {output.decode()}"
 
-    output = worker.exec_run(cmd=f"python -c '{check_script.format(num_replicas=2)}'")
-    assert output.exit_code == 0
+        # Run Worker node should fail to connect to GCS
+        exit_code, output = worker_node.exec_run(cmd="ray start --address gcs:6379")
+        assert exit_code == 0, f"Worker failed to run: {output.decode()}"
+
+    finally:
+        if gcs_node is not None:
+            gcs_node.remove(force=True)
+        if worker_node is not None:
+            worker_node.remove(force=True)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Only works on linux.")
+def test_head_multi_network_select_wrong_fail(
+    docker_client, network_zero, network_one, network_two
+):
+    gcs_node = None
+    worker_node = None
+    try:
+        gcs_node = node(docker_client, [network_zero, network_one], name="gcs")
+        worker_node = node(docker_client, [network_one])
+
+        # Run GCS node
+        exit_code, output = gcs_node.exec_run(
+            cmd=f"python -c '{net_script.format(address='127.6.3.0', port=6379)}'"
+        )
+        print(output.decode())
+
+        exit_code, output = worker_node.exec_run(
+            cmd=f"python -c '{net_script.format(address='127.6.3.0', port=6379)}'"
+        )
+        print(output.decode())
+
+        bind_gcs_addr = gcs_node.attrs["NetworkSettings"]["Networks"]["network_zero"][
+            "IPAddress"
+        ]
+        exit_code, output = gcs_node.exec_run(
+            cmd=f"ray start --head --node-ip-address={bind_gcs_addr}"
+        )
+        assert exit_code == 0, f"GCS failed to run: {output.decode()}"
+        print(output.decode())
+
+        # Parse GCS address from the log output. Pretty hacky...
+        import re
+
+        ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+        output_plain = ansi_escape.sub("", output.decode())
+        gcs_addr = re.search(
+            r"Local node IP: (\d+.\d+.\d+.\d+)", output_plain
+        ).groups()[0]
+
+        assert (
+            gcs_addr == bind_gcs_addr
+        ), "Head node not running at the selected address"
+
+        # Run Worker node should fail to connect to GCS
+        exit_code, output = worker_node.exec_run(
+            cmd=f"ray start --address {gcs_addr}:6379"
+        )
+        assert (
+            exit_code != 0
+        ), f"Worker should fail to connect to GCS: {output.decode()}"
+
+    finally:
+        if gcs_node is not None:
+            gcs_node.remove(force=True)
+        if worker_node is not None:
+            worker_node.remove(force=True)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Only works on linux.")
+def test_head_multi_network_select_ok(
+    docker_client, network_zero, network_one, network_two
+):
+    gcs_node = None
+    worker_node = None
+    try:
+        gcs_node = node(
+            docker_client, [network_zero, network_one, network_two], name="gcs"
+        )
+        worker_node = node(docker_client, [network_zero])
+
+        # Run GCS node
+        # exit_code, output = gcs_node.exec_run(
+        #     cmd=f"python -c '{net_script.format(address='127.6.3.0', port=6379)}'"
+        # )
+
+        # exit_code, output = worker_node.exec_run(
+        #     cmd=f"python -c '{net_script.format(address='127.6.3.0', port=6379)}'"
+        # )
+        bind_gcs_addr = gcs_node.attrs["NetworkSettings"]["Networks"]["network_zero"][
+            "IPAddress"
+        ]
+        exit_code, output = gcs_node.exec_run(
+            cmd=f"ray start --head --node-ip-address={bind_gcs_addr}"
+        )
+        assert exit_code == 0, f"GCS failed to run: {output.decode()}"
+
+        # Parse GCS address from the log output. Pretty hacky...
+        import re
+
+        ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+        output_plain = ansi_escape.sub("", output.decode())
+        gcs_addr = re.search(
+            r"Local node IP: (\d+.\d+.\d+.\d+)", output_plain
+        ).groups()[0]
+
+        assert (
+            gcs_addr == bind_gcs_addr
+        ), "Head node not running at the selected address"
+
+        # Running worker node should fail to connect to GCS
+        exit_code, output = worker_node.exec_run(
+            cmd=f"ray start --address {gcs_addr}:6379"
+        )
+        assert (
+            exit_code == 0
+        ), f"Worker should not fail to connect to GCS: {output.decode()}"
+
+    finally:
+        if gcs_node is not None:
+            gcs_node.remove(force=True)
+        if worker_node is not None:
+            worker_node.remove(force=True)
+
+
+@pytest.mark.skip()
+def test_multiple_network_ok(docker_client, network_one, network_zero):
+    c = None
+    try:
+        c = node(
+            docker_client,
+            [network_one, network_zero],
+        )
+        exit_code, output = c.exec_run(
+            cmd=f"python -c '{net_script.format(address='127.6.3.0', port=6379)}'"
+        )
+        # exit_code, output = c.wait(timeout=10)
+        assert exit_code == 1111, output.decode()
+    finally:
+        if c is not None:
+            # Clean up
+            c.remove(force=True)
+            # c.wait(timeout=10)
 
 
 if __name__ == "__main__":

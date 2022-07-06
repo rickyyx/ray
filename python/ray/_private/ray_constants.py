@@ -51,6 +51,9 @@ OBJECT_STORE_MINIMUM_MEMORY_BYTES = 75 * 1024 * 1024
 DEFAULT_REDIS_MAX_MEMORY_BYTES = 10 ** 10
 # The smallest cap on the memory used by Redis that we allow.
 REDIS_MINIMUM_MEMORY_BYTES = 10 ** 7
+# Number of retries made to the internal KV store (previously redis) 
+# when getting entries
+RAY_GCS_KV_GET_MAX_RETRY = env_integer("RAY_GCS_KV_GET_MAX_RETRY", 20)
 # Above this number of bytes, raise an error by default unless the user sets
 # RAY_ALLOW_SLOW_STORAGE=1. This avoids swapping with large object stores.
 REQUIRE_SHM_SIZE_THRESHOLD = 10 ** 10

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_LATEST = "session_latest"
 NUM_PORT_RETRIES = 40
-NUM_REDIS_GET_RETRIES = 20
+NUM_REDIS_GET_RETRIES = ray_constants.RAY_GCS_KV_GET_MAX_RETRY
 
 
 class Node:
@@ -586,18 +586,20 @@ class Node:
 
     def get_gcs_client(self):
         if self._gcs_client is None:
+            gcs_address = None
+            last_ex = None
             for _ in range(NUM_REDIS_GET_RETRIES):
-                gcs_address = None
-                last_ex = None
                 try:
                     gcs_address = self.gcs_address
                     self._gcs_client = GcsClient(address=gcs_address)
+                    break
                 except Exception:
                     last_ex = traceback.format_exc()
                     logger.debug(f"Connecting to GCS: {last_ex}")
                     time.sleep(1)
+
             assert self._gcs_client is not None, (
-                f"Failed to connect to GCS at address={gcs_address}. "
+                f"Failed to connect to GCS at address={self.gcs_address}. "
                 f"Last exception: {last_ex}"
             )
             ray.experimental.internal_kv._initialize_internal_kv(self._gcs_client)
