@@ -380,8 +380,11 @@ template <class T>
 std::string FormatVec(const std::vector<T> &vec) {
   std::stringstream ss;
   ss << "[";
-  for (auto const &e : vec) {
-    ss << e << ",";
+  for (size_t i = 0; i < vec.size(); ++i) {
+    ss << vec[i];
+    if (i < vec.size() - 1) {
+      ss << ",";
+    }
   }
   ss << "]";
   return ss.str();

@@ -206,6 +206,10 @@ TEST(UtilTest, IsProcessAlive) {
 }
 
 TEST(UtilTest, FormatVec) {
+  const std::string expect0 = "[aa]";
+  const std::vector<std::string> vec0{"aa"};
+  ASSERT_EQ(expect0, FormatVec<std::string>(vec0));
+
   const std::string expect1 = "[aa,bb,cc]";
   const std::vector<std::string> vec1{"aa", "bb", "cc"};
   ASSERT_EQ(expect1, FormatVec<std::string>(vec1));
@@ -215,8 +219,8 @@ TEST(UtilTest, FormatVec) {
   ASSERT_EQ(expect2, FormatVec<std::string>(vec2));
 
   const std::string expect3 = "[1,2,3]";
-  const std::vector<int> vec1{1, 2, 3};
-  ASSERT_EQ(expect3, FormatVec<std::string>(vec3));
+  const std::vector<int> vec3{1, 2, 3};
+  ASSERT_EQ(expect3, FormatVec<int>(vec3));
 }
 
 }  // namespace ray
