@@ -117,7 +117,7 @@ void LocalObjectManager::ReleaseFreedObject(const ObjectID &object_id) {
   RAY_LOG(DEBUG) << "Unpinning object " << object_id;
   // The object should be in one of these states: pinned, spilling, or spilled.
   RAY_CHECK((pinned_objects_.count(object_id) > 0) ||
-            (spilled_objects_url_.count(object_id) > 0) ||
+            (spilled_objects_.count(object_id) > 0) ||
             (objects_pending_spill_.count(object_id) > 0));
   if (pinned_objects_.count(object_id)) {
     pinned_objects_size_ -= pinned_objects_[object_id]->GetSize();
@@ -218,7 +218,10 @@ bool LocalObjectManager::SpillObjectsOfSize(int64_t num_bytes_to_spill) {
           RAY_LOG(DEBUG) << "Spilled " << bytes_to_spill << " bytes in "
                          << (now - start_time) / 1e6 << "ms";
           spilled_bytes_total_ += bytes_to_spill;
+          spilled_bytes_current_ += bytes_to_spill;
           spilled_objects_total_ += objects_to_spill.size();
+          spilled_objects_current_ += objects_to_spill.size();
+
           // Adjust throughput timing to account for concurrent spill operations.
           spill_time_total_s_ +=
               (now - std::max(start_time, last_spill_finish_ns_)) / 1e9;
@@ -401,11 +404,11 @@ void LocalObjectManager::OnObjectSpilled(const std::vector<ObjectID> &object_ids
     }
 
     // Mark that the object is spilled and unpin the pending requests.
-    spilled_objects_url_.emplace(object_id, object_url);
-    RAY_LOG(DEBUG) << "Unpinning pending spill object " << object_id;
     auto it = objects_pending_spill_.find(object_id);
     RAY_CHECK(it != objects_pending_spill_.end());
     const auto object_size = it->second->GetSize();
+    spilled_objects_.emplace(object_id, SpillObjectInfo(object_url, object_size));
+    RAY_LOG(DEBUG) << "Unpinning pending spill object " << object_id;
     num_bytes_pending_spill_ -= object_size;
     objects_pending_spill_.erase(it);
 
@@ -434,9 +437,9 @@ std::string LocalObjectManager::GetLocalSpilledObjectURL(const ObjectID &object_
     // In that case, the URL is supposed to be obtained by OBOD.
     return "";
   }
-  auto entry = spilled_objects_url_.find(object_id);
-  if (entry != spilled_objects_url_.end()) {
-    return entry->second;
+  auto entry = spilled_objects_.find(object_id);
+  if (entry != spilled_objects_.end()) {
+    return entry->second.spill_url_;
   } else {
     return "";
   }
@@ -503,6 +506,8 @@ void LocalObjectManager::AsyncRestoreSpilledObject(
 
 void LocalObjectManager::ProcessSpilledObjectsDeleteQueue(uint32_t max_batch_size) {
   std::vector<std::string> object_urls_to_delete;
+  size_t num_bytes_to_delete = 0;
+
   // Process upto batch size of objects to delete.
   while (!spilled_object_pending_delete_.empty() &&
          object_urls_to_delete.size() < max_batch_size) {
@@ -516,18 +521,18 @@ void LocalObjectManager::ProcessSpilledObjectsDeleteQueue(uint32_t max_batch_siz
     }
 
     // Object id is either spilled or not spilled at this point.
-    const auto spilled_objects_url_it = spilled_objects_url_.find(object_id);
-    if (spilled_objects_url_it != spilled_objects_url_.end()) {
+    const auto spilled_objects_it = spilled_objects_.find(object_id);
+    if (spilled_objects_it != spilled_objects_.end()) {
       // If the object was spilled, see if we can delete it. We should first check the
       // ref count.
-      std::string &object_url = spilled_objects_url_it->second;
+      std::string &object_url = spilled_objects_it->second.spill_url_;
       // Note that here, we need to parse the object url to obtain the base_url.
       auto parsed_url = ParseURL(object_url);
       const auto base_url_it = parsed_url->find("url");
       RAY_CHECK(base_url_it != parsed_url->end());
       const auto &url_ref_count_it = url_ref_count_.find(base_url_it->second);
       RAY_CHECK(url_ref_count_it != url_ref_count_.end())
-          << "url_ref_count_ should exist when spilled_objects_url_ exists. Please "
+          << "url_ref_count_ should exist when spilled_objects_ exists. Please "
              "submit a Github issue if you see this error.";
       url_ref_count_it->second -= 1;
 
@@ -537,8 +542,9 @@ void LocalObjectManager::ProcessSpilledObjectsDeleteQueue(uint32_t max_batch_siz
         RAY_LOG(DEBUG) << "The URL " << object_url
                        << " is deleted because the references are out of scope.";
         object_urls_to_delete.emplace_back(object_url);
+        num_bytes_to_delete += spilled_objects_it->second.object_size_;
       }
-      spilled_objects_url_.erase(spilled_objects_url_it);
+      spilled_objects_.erase(spilled_objects_it);
     } else {
       // If the object was not spilled, it gets pinned again. Unpin here to
       // prevent a memory leak.
@@ -548,30 +554,38 @@ void LocalObjectManager::ProcessSpilledObjectsDeleteQueue(uint32_t max_batch_siz
     spilled_object_pending_delete_.pop();
   }
   if (object_urls_to_delete.size() > 0) {
-    DeleteSpilledObjects(object_urls_to_delete);
+    RAY_CHECK(num_bytes_to_delete > 0) << "To be deleted " << object_urls_to_delete.size()
+                                       << " spilled objects have 0 size :"
+                                       << FormatVec<std::string>(object_urls_to_delete);
+    DeleteSpilledObjects(object_urls_to_delete, num_bytes_to_delete);
   }
 }
 
-void LocalObjectManager::DeleteSpilledObjects(std::vector<std::string> &urls_to_delete) {
-  io_worker_pool_.PopDeleteWorker(
-      [this, urls_to_delete](std::shared_ptr<WorkerInterface> io_worker) {
-        RAY_LOG(DEBUG) << "Sending delete spilled object request. Length: "
-                       << urls_to_delete.size();
-        rpc::DeleteSpilledObjectsRequest request;
-        for (const auto &url : urls_to_delete) {
-          request.add_spilled_objects_url(std::move(url));
-        }
-        io_worker->rpc_client()->DeleteSpilledObjects(
-            request,
-            [this, io_worker](const ray::Status &status,
-                              const rpc::DeleteSpilledObjectsReply &reply) {
-              io_worker_pool_.PushDeleteWorker(io_worker);
-              if (!status.ok()) {
-                RAY_LOG(ERROR) << "Failed to send delete spilled object request: "
-                               << status.ToString();
-              }
-            });
-      });
+void LocalObjectManager::DeleteSpilledObjects(std::vector<std::string> &urls_to_delete,
+                                              size_t num_bytes_to_delete) {
+  io_worker_pool_.PopDeleteWorker([this, urls_to_delete, num_bytes_to_delete](
+                                      std::shared_ptr<WorkerInterface> io_worker) {
+    RAY_LOG(DEBUG) << "Sending delete spilled object request. Length: "
+                   << urls_to_delete.size();
+    rpc::DeleteSpilledObjectsRequest request;
+    for (const auto &url : urls_to_delete) {
+      request.add_spilled_objects_url(std::move(url));
+    }
+    io_worker->rpc_client()->DeleteSpilledObjects(
+        request,
+        [this, io_worker, urls_to_delete, num_bytes_to_delete](
+            const ray::Status &status, const rpc::DeleteSpilledObjectsReply &reply) {
+          io_worker_pool_.PushDeleteWorker(io_worker);
+          if (!status.ok()) {
+            RAY_LOG(ERROR) << "Failed to send delete spilled object request: "
+                           << status.ToString();
+          } else {
+            // Update current spilled object metric
+            spilled_objects_current_ -= urls_to_delete.size();
+            spilled_bytes_current_ -= num_bytes_to_delete;
+          }
+        });
+  });
 }
 
 void LocalObjectManager::FillObjectSpillingStats(rpc::GetNodeStatsReply *reply) const {
@@ -583,6 +597,8 @@ void LocalObjectManager::FillObjectSpillingStats(rpc::GetNodeStatsReply *reply) 
   stats->set_restored_bytes_total(restored_bytes_total_);
   stats->set_restored_objects_total(restored_objects_total_);
   stats->set_object_store_bytes_primary_copy(pinned_objects_size_);
+  stats->set_spilled_bytes_current(spilled_bytes_current_);
+  stats->set_spilled_objects_current(spilled_objects_current_);
 }
 
 void LocalObjectManager::RecordMetrics() const {
@@ -627,7 +643,7 @@ bool LocalObjectManager::HasLocallySpilledObjects() const {
   // Report non-zero usage when there are spilled / spill-pending live objects, to
   // prevent this node from being drained. Note that the value reported here is also
   // used for scheduling.
-  return !spilled_objects_url_.empty();
+  return !spilled_objects_.empty();
 }
 
 std::string LocalObjectManager::DebugString() const {
@@ -638,8 +654,11 @@ std::string LocalObjectManager::DebugString() const {
   result << "- num objects pending restore: " << objects_pending_restore_.size() << "\n";
   result << "- num objects pending spill: " << objects_pending_spill_.size() << "\n";
   result << "- num bytes pending spill: " << num_bytes_pending_spill_ << "\n";
+  result << "- cumulative num bytes spilled: " << spilled_bytes_total_ << "\n";
   result << "- cumulative spill requests: " << spilled_objects_total_ << "\n";
   result << "- cumulative restore requests: " << restored_objects_total_ << "\n";
+  result << "- current spill objects size: " << spilled_bytes_current_ << "\n";
+  result << "- current spill objects count: " << spilled_objects_current_ << "\n";
   result << "- spilled objects pending delete: " << spilled_object_pending_delete_.size()
          << "\n";
   return result.str();

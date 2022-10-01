@@ -205,6 +205,20 @@ TEST(UtilTest, IsProcessAlive) {
   RAY_CHECK(!IsProcessAlive(pid));
 }
 
+TEST(UtilTest, FormatVec) {
+  const std::string expect1 = "[aa,bb,cc]";
+  const std::vector<std::string> vec1{"aa", "bb", "cc"};
+  ASSERT_EQ(expect1, FormatVec<std::string>(vec1));
+
+  const std::string expect2 = "[]";
+  const std::vector<std::string> vec2;
+  ASSERT_EQ(expect2, FormatVec<std::string>(vec2));
+
+  const std::string expect3 = "[1,2,3]";
+  const std::vector<int> vec1{1, 2, 3};
+  ASSERT_EQ(expect3, FormatVec<std::string>(vec3));
+}
+
 }  // namespace ray
 
 int main(int argc, char **argv) {

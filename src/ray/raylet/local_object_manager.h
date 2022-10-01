@@ -177,6 +177,14 @@ class LocalObjectManager {
     const std::optional<ObjectID> generator_id;
   };
 
+  struct SpillObjectInfo {
+    SpillObjectInfo(const std::string &spill_url, size_t object_size)
+        : spill_url_(spill_url), object_size_(object_size) {}
+
+    std::string spill_url_;
+    size_t object_size_;
+  };
+
   FRIEND_TEST(LocalObjectManagerTest, TestSpillObjectsOfSizeZero);
   FRIEND_TEST(LocalObjectManagerTest, TestSpillUptoMaxFuseCount);
   FRIEND_TEST(LocalObjectManagerTest,
@@ -213,7 +221,10 @@ class LocalObjectManager {
   /// Delete spilled objects stored in given urls.
   ///
   /// \param urls_to_delete List of urls to delete from external storages.
-  void DeleteSpilledObjects(std::vector<std::string> &urls_to_delete);
+  /// \param num_bytes_to_delete Total size of objects to be deleted from external
+  /// storage.
+  void DeleteSpilledObjects(std::vector<std::string> &urls_to_delete,
+                            size_t num_bytes_to_delete);
 
   const NodeID self_node_id_;
   const std::string self_node_address_;
@@ -241,7 +252,7 @@ class LocalObjectManager {
   /// following maps:
   /// - pinned_objects_: objects pinned in shared memory
   /// - objects_pending_spill_: objects pinned and waiting for spill to complete
-  /// - spilled_objects_url_: objects already spilled
+  /// - spilled_objects_: objects already spilled
   absl::flat_hash_map<ObjectID, LocalObjectInfo> local_objects_;
 
   // Objects that are pinned on this node.
@@ -285,9 +296,9 @@ class LocalObjectManager {
   /// because those objects could be still in progress of spilling.
   std::queue<ObjectID> spilled_object_pending_delete_;
 
-  /// Mapping from object id to url_with_offsets. We cannot reuse pinned_objects_ because
-  /// pinned_objects_ entries are deleted when spilling happens.
-  absl::flat_hash_map<ObjectID, std::string> spilled_objects_url_;
+  /// Mapping from object id to spill objects info . We cannot reuse pinned_objects_
+  /// because pinned_objects_ entries are deleted when spilling happens.
+  absl::flat_hash_map<ObjectID, SpillObjectInfo> spilled_objects_;
 
   /// Base URL -> ref_count. It is used because there could be multiple objects
   /// within a single spilled file. We need to ref count to avoid deleting the file
@@ -346,6 +357,12 @@ class LocalObjectManager {
 
   /// The total number of objects spilled.
   int64_t spilled_objects_total_ = 0;
+
+  /// The current number of bytes spilled.
+  int64_t spilled_bytes_current_ = 0;
+
+  /// The current number of objects spilled.
+  int64_t spilled_objects_current_ = 0;
 
   /// The last time a restore operation finished.
   int64_t last_restore_finish_ns_ = 0;

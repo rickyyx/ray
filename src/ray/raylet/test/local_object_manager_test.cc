@@ -346,7 +346,7 @@ class LocalObjectManagerTestWithMinSpillingSize {
     // TODO(swang): Assert this for all tests.
     ASSERT_TRUE(manager.pinned_objects_size_ == 0);
     ASSERT_TRUE(manager.pinned_objects_.empty());
-    ASSERT_TRUE(manager.spilled_objects_url_.empty());
+    ASSERT_TRUE(manager.spilled_objects_.empty());
     ASSERT_TRUE(manager.objects_pending_spill_.empty());
     ASSERT_TRUE(manager.url_ref_count_.empty());
     ASSERT_TRUE(manager.local_objects_.empty());

@@ -376,4 +376,14 @@ void QuickExit();
 /// \return the foramtted value
 std::string FormatFloat(float value, int32_t precision);
 
+template <class T>
+std::string FormatVec(const std::vector<T> &vec) {
+  std::stringstream ss;
+  ss << "[";
+  for (auto const &e : vec) {
+    ss << e << ",";
+  }
+  ss << "]";
+  return ss.str();
+}
 }  // namespace ray
