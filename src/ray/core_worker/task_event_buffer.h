@@ -42,8 +42,9 @@ namespace worker {
 /// will not happen in the critical path of task execution/submission.
 class TaskEvent {
  public:
+  TaskEvent() = default;
   /// Constructor for Profile events
-  explicit TaskEvent(TaskID task_id, JobID job_id, int32_t attempt_number);
+  TaskEvent(TaskID task_id, JobID job_id, int32_t attempt_number);
 
   virtual ~TaskEvent() = default;
 
@@ -69,15 +70,15 @@ class TaskEvent {
 /// TaskStatusEvent is generated when a task changes its status.
 class TaskStatusEvent : public TaskEvent {
  public:
-  explicit TaskStatusEvent(
-      TaskID task_id,
-      JobID job_id,
-      int32_t attempt_number,
-      const rpc::TaskStatus &task_status,
-      int64_t timestamp,
-      const std::shared_ptr<const TaskSpecification> &task_spec = nullptr,
-      absl::optional<NodeID> node_id = absl::nullopt,
-      absl::optional<WorkerID> worker_id = absl::nullopt);
+  TaskStatusEvent() = default;
+  TaskStatusEvent(TaskID task_id,
+                  JobID job_id,
+                  int32_t attempt_number,
+                  const rpc::TaskStatus &task_status,
+                  int64_t timestamp,
+                  const std::shared_ptr<const TaskSpecification> &task_spec = nullptr,
+                  absl::optional<NodeID> node_id = absl::nullopt,
+                  absl::optional<WorkerID> worker_id = absl::nullopt);
 
   void ToRpcTaskEvents(rpc::TaskEvents *rpc_task_events) override;
 
@@ -99,14 +100,16 @@ class TaskStatusEvent : public TaskEvent {
 /// TaskProfileEvent is generated when `RAY_enable_timeline` is on.
 class TaskProfileEvent : public TaskEvent {
  public:
-  explicit TaskProfileEvent(TaskID task_id,
-                            JobID job_id,
-                            int32_t attempt_number,
-                            const std::string &component_type,
-                            const std::string &component_id,
-                            const std::string &node_ip_address,
-                            const std::string &event_name,
-                            int64_t start_time);
+  TaskProfileEvent() = default;
+
+  TaskProfileEvent(TaskID task_id,
+                   JobID job_id,
+                   int32_t attempt_number,
+                   const std::string &component_type,
+                   const std::string &component_id,
+                   const std::string &node_ip_address,
+                   const std::string &event_name,
+                   int64_t start_time);
 
   void ToRpcTaskEvents(rpc::TaskEvents *rpc_task_events) override;
 
@@ -122,8 +125,8 @@ class TaskProfileEvent : public TaskEvent {
   const std::string component_id_;
   const std::string node_ip_address_;
   const std::string event_name_;
-  const int64_t start_time_;
-  int64_t end_time_;
+  const int64_t start_time_ = 0;
+  int64_t end_time_ = 0;
   std::string extra_data_;
 };
 
@@ -271,6 +274,8 @@ class TaskEventBufferImpl : public TaskEventBuffer {
 
   /// Circular buffered task events.
   boost::circular_buffer<std::unique_ptr<TaskEvent>> buffer_ GUARDED_BY(mutex_);
+
+  std::vector<std::unique_ptr<TaskEvent>> delay_gc_ GUARDED_BY(mutex_);
 
   /// Number of profile task events dropped since the last report flush.
   size_t num_profile_task_events_dropped_ GUARDED_BY(mutex_) = 0;

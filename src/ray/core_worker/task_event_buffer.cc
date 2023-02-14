@@ -116,6 +116,7 @@ Status TaskEventBufferImpl::Start(bool auto_flush) {
       << "RAY_task_events_report_interval_ms should be > 0 to use TaskEventBuffer.";
 
   buffer_.set_capacity(RayConfig::instance().task_events_max_buffer_size());
+  delay_gc_.reserve(1024);
   // Reporting to GCS, set up gcs client and and events flushing.
   auto status = gcs_client_->Connect(io_service_);
   if (!status.ok()) {
@@ -184,14 +185,20 @@ void TaskEventBufferImpl::AddTaskEvent(std::unique_ptr<TaskEvent> task_event) {
   absl::MutexLock lock(&mutex_);
 
   if (buffer_.full()) {
-    const auto &to_evict = buffer_.front();
+    auto &to_evict = buffer_.front();
+    std::unique_ptr<TaskEvent> gc;
     if (to_evict->IsProfileEvent()) {
+      gc = std::make_unique<TaskProfileEvent>();
       num_profile_task_events_dropped_++;
     } else {
+      gc = std::make_unique<TaskStatusEvent>();
       num_status_task_events_dropped_++;
     }
+    gc.swap(to_evict);
+    delay_gc_.push_back(std::move(gc));
   }
   buffer_.push_back(std::move(task_event));
+  RAY_CHECK(buffer_.front() != nullptr);
 }
 
 void TaskEventBufferImpl::FlushEvents(bool forced) {
@@ -201,6 +208,10 @@ void TaskEventBufferImpl::FlushEvents(bool forced) {
   size_t num_status_task_events_dropped = 0;
   size_t num_profile_task_events_dropped = 0;
   std::vector<std::unique_ptr<TaskEvent>> to_send;
+
+  // Deallocate those.
+  delay_gc_.clear();
+
   to_send.reserve(RayConfig::instance().task_events_send_batch_size());
 
   {
@@ -247,6 +258,7 @@ void TaskEventBufferImpl::FlushEvents(bool forced) {
   size_t num_status_event_to_send = 0;
   for (auto &task_event : to_send) {
     auto events_by_task = data->add_events_by_task();
+    RAY_CHECK(task_event != nullptr);
     if (task_event->IsProfileEvent()) {
       num_profile_event_to_send++;
     } else {
