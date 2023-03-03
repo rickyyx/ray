@@ -52,6 +52,8 @@ from ray.experimental.state.state_cli import (
     summary_state_cli_group,
 )
 
+from ray.hack.cli import ray_doctor
+
 logger = logging.getLogger(__name__)
 
 
@@ -2448,6 +2450,7 @@ cli.add_command(cpp)
 cli.add_command(disable_usage_stats)
 cli.add_command(enable_usage_stats)
 cli.add_command(ray_list, name="list")
+cli.add_command(ray_doctor, name="doctor")
 cli.add_command(ray_get, name="get")
 add_command_alias(summary_state_cli_group, name="summary", hidden=False)
 add_command_alias(logs_state_cli_group, name="logs", hidden=False)
