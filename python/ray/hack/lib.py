@@ -73,7 +73,7 @@ class IdleNodes(Check):
 
     def head_node_ip(self) -> str:
         import ray._private.services as services
-        address = services.canonicalize_bootstrap_address(addr=None)
+        address = services.canonicalize_bootstrap_address(addr="auto")
         assert address is not None
         head_node_ip = address.split(":")[0]
         return head_node_ip
