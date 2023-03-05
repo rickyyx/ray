@@ -35,3 +35,7 @@ class Diagnosis:
 
     def is_ok(self):
         return self.level == DiagnosisLevel.OK 
+
+    @classmethod 
+    def OK(cls, name):
+        return cls(name, level=DiagnosisLevel.OK, actions=[], details=DiagnosisDetail(msg=""))

@@ -2,7 +2,7 @@ import click
 from rich import print
 from rich.panel import Panel
 
-from ray.hack.lib import StuckTasks
+from ray.hack.lib import StuckTasks, IdleNodes
 
 
 def print_results(results):
@@ -20,7 +20,7 @@ def print_results(results):
 
 @click.command()
 def ray_doctor():
-    checks = [StuckTasks()]
+    checks = [StuckTasks(), IdleNodes()]
     results = []
     for check in checks:
         results.append(check.to_diagnosis())
