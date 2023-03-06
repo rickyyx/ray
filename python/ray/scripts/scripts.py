@@ -52,7 +52,7 @@ from ray.experimental.state.state_cli import (
     summary_state_cli_group,
 )
 
-from ray.hack.cli import ray_doctor
+from ray.experimental.hack.cli import ray_doctor
 
 logger = logging.getLogger(__name__)
 
