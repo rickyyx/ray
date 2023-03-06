@@ -2,7 +2,7 @@ import click
 from rich import print
 from rich.panel import Panel
 
-from ray.hack.lib import StuckTasks, IdleNodes
+from ray.experimental.hack.lib import StuckTasks, IdleNodes
 
 
 def print_results(results):
