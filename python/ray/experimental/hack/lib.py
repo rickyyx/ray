@@ -6,7 +6,7 @@ from typing import Optional
 import logging
 
 from ray.experimental.state.api import list_nodes, list_tasks
-from ray.hack.schema import Action, Diagnosis, DiagnosisDetail, DiagnosisLevel
+from ray.experimental.hack.schema import Action, Diagnosis, DiagnosisDetail, DiagnosisLevel
 
 from prometheus_api_client import PrometheusConnect
 from prometheus_api_client.utils import parse_datetime
