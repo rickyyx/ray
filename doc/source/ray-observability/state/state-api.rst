@@ -608,6 +608,20 @@ through the APIs because they are already garbage collected.
 For example, Ray periodically garbage collects DEAD state actor data to reduce memory usage.
 Or it cleans up the FINISHED state of tasks when its lineage goes out of scope.
 
+Configuring State API
+---------------------
+
+State API can be configured through environment variables. 
+
+Configuring state API for tasks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Ray collects task states from workers, and propagate such states to the head node (GCS). There are a number of environment variables that can be used to configure the behavior of the state API for tasks.
+
+- 
+
+One could use 
+
 API Reference
 -------------
 
