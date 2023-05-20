@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -459,6 +460,7 @@ class Worker:
         self._enable_record_task_log = ray_constants.RAY_ENABLE_RECORD_TASK_LOGGING
         self._out_file = None
         self._err_file = None
+        self._msg_queue = queue.Queue()
         # Create the lock here because the serializer will use it before
         # initializing Ray.
         self.lock = threading.RLock()
@@ -848,6 +850,19 @@ class Worker:
         ray._private.utils.set_sigterm_handler(sigterm_handler)
         self.core_worker.run_task_loop()
         sys.exit(0)
+
+    def run_write_msg_to_stdout_err_loop(self):
+        while True:
+            # Wait for msg, or an exit signal (None)
+            msg = self._msg_queue.get(block=True)
+            if msg is None:
+                # This is when the thread is stopping.
+                return
+            print(msg, file=sys.stdout, end="")
+            print(msg, file=sys.stderr, end="")
+
+    def write_msg_to_stdout_err_async(self, msg: str) -> None:
+        self._msg_queue.put_nowait(msg)
 
     def print_logs(self):
         """Prints log messages from workers on all nodes in the same job."""
@@ -2295,6 +2310,16 @@ def connect(
             worker.logger_thread.daemon = True
             worker.logger_thread.start()
 
+    if mode == WORKER_MODE:
+        # Start a thread that async flushes messages to stdout and stderr.
+        worker.async_log_thread = threading.Thread(
+            target=worker.run_write_msg_to_stdout_err_loop,
+            name="ray_async_log_thread",
+        )
+
+        worker.async_log_thread.daemon = True
+        worker.async_log_thread.start()
+
     if mode == SCRIPT_MODE:
         # TODO(rkn): Here we first export functions to run, then remote
         # functions. The order matters. For example, one of the functions to
@@ -2346,6 +2371,10 @@ def disconnect(exiting_interpreter=False):
             worker.listener_thread.join()
         if hasattr(worker, "logger_thread"):
             worker.logger_thread.join()
+
+        # Signal the async logging thread for worker to exit.
+        worker._msg_queue.put_nowait(None)
+
         worker.threads_stopped.clear()
 
         worker._session_index += 1
