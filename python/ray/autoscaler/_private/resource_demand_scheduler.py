@@ -6,6 +6,7 @@ a vector of resource shape demands, and the resource demand scheduler will
 return a list of node types that can satisfy the demands given constraints
 (i.e., reverse bin packing).
 """
+from rich import print
 
 import collections
 import copy
@@ -218,6 +219,14 @@ class ResourceDemandScheduler:
             nodes, launching_nodes, unused_resources_by_ip
         )
 
+        # from rich import print
+        # print("Cluster resources: \n")
+        # print(node_resources)
+        # print("Unused: \n")
+        # print(unused_resources_by_ip)
+        # print("Nodes: \n")
+        # print(nodes)
+
         logger.debug("Cluster resources: {}".format(node_resources))
         logger.debug("Node counts: {}".format(node_type_counts))
         # Step 2: add nodes to add to satisfy min_workers for each type
@@ -262,6 +271,13 @@ class ResourceDemandScheduler:
         # nodes to add) with pg_demands_nodes_max_launch_limit calculated later
         resource_demands = placement_group_demand_vector + resource_demands
 
+        # from rich import print
+        # print("Strict sptread: \n")
+        # print(strict_spreads)
+        # print("PG demand: \n")
+        # print(placement_group_demand_vector)
+        # print("Resources demand: \n")
+        # print(resource_demands)
         (
             spread_pg_nodes_to_add,
             node_resources,
@@ -279,6 +295,12 @@ class ResourceDemandScheduler:
             node_resources,
             placement_group_demand_vector,
         )
+        if spread_pg_nodes_to_add:
+            print("Placement group demand vector:")
+            print(placement_group_demand_vector)
+            print("Unfulfilled PG :")
+            print(unfulfilled_placement_groups_demands)
+
         # Add 1 to account for the head node.
         max_to_add = self.max_workers + 1 - sum(node_type_counts.values())
         pg_demands_nodes_max_launch_limit, _ = get_nodes_for(
@@ -323,6 +345,9 @@ class ResourceDemandScheduler:
             if nodes_to_add > 0:
                 total_nodes_to_add[node_type] = nodes_to_add
 
+        if total_nodes_to_add:
+            print("Total nodes to add")
+            print(total_nodes_to_add)
         # Limit the number of concurrent launches
         total_nodes_to_add = self._get_concurrent_resource_demand_to_launch(
             total_nodes_to_add,
@@ -332,6 +357,9 @@ class ResourceDemandScheduler:
             adjusted_min_workers,
             placement_groups_nodes_max_limit,
         )
+        if total_nodes_to_add:
+            print("Total nodes to add after limit")
+            print(total_nodes_to_add)
 
         logger.debug("Node requests: {}".format(total_nodes_to_add))
         return total_nodes_to_add, final_unfulfilled
@@ -567,9 +595,18 @@ class ResourceDemandScheduler:
         for bundles in strict_spreads:
             # Try to pack as many bundles of this group as possible on existing
             # nodes. The remaining will be allocated on new nodes.
+            print("Node resources before PG strict:\n")
+            print(node_resources)
+            print("PG strict demands: \n")
+            print(bundles)
+
             unfulfilled, node_resources = get_bin_pack_residual(
                 node_resources, bundles, strict_spread=True
             )
+            print("Node resources after PG strict:\n")
+            print(node_resources)
+            print("Unfulfilled: \n")
+            print(unfulfilled)
             max_to_add = self.max_workers + 1 - sum(node_type_counts.values())
             # Allocate new nodes for the remaining bundles that don't fit.
             to_launch, _ = get_nodes_for(
@@ -581,6 +618,8 @@ class ResourceDemandScheduler:
                 utilization_scorer=utilization_scorer,
                 strict_spread=True,
             )
+            print("To Launch \n")
+            print(to_launch)
             _inplace_add(node_type_counts, to_launch)
             _inplace_add(to_add, to_launch)
             new_node_resources = _node_type_counts_to_node_resources(
@@ -593,6 +632,13 @@ class ResourceDemandScheduler:
             )
             assert not unfulfilled
             node_resources += including_reserved
+        if to_add:
+            print("To Add :")
+            print(to_add)
+            print("Node resources :")
+            print(node_resources)
+            print("Node type counts :")
+            print(node_type_counts)
         return to_add, node_resources, node_type_counts
 
     def debug_string(
