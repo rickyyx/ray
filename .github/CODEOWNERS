@@ -19,11 +19,13 @@
 /src/ray/protobuf/common.proto @wuisawesome @ericl @ameerhajali @robertnishihara @pcmoritz @raulchen @ray-project/ray-core
 /src/ray/protobuf/gcs.proto @wuisawesome @ericl @ameerhajali @robertnishihara @pcmoritz @raulchen @ray-project/ray-core
 /src/ray/protobuf/gcs_service.proto @wuisawesome @ericl @ameerhajali @robertnishihara @pcmoritz @raulchen @ray-project/ray-core
+/src/ray/protobuf/experimental/autoscaler.proto @scv119 @rickyyx @ray-project/ray-core @brucez-anyscale
 /dashboard/modules/snapshot @wuisawesome @ijrsvt @edoakes @alanwguo @architkulkarni
-/python/ray/autoscaler/_private/monitor.py @wuisawesome @DmitriGekhtman
+/python/ray/autoscaler/_private/monitor.py @wuisawesome @DmitriGekhtman @rickyyx @scv119
+
 
 # Autoscaler
-/python/ray/autoscaler/ @wuisawesome @DmitriGekhtman @ericl @ray-project/ray-core
+/python/ray/autoscaler/ @wuisawesome @DmitriGekhtman @ericl @ray-project/ray-core @rickyyx @scv119
 
 # Metrics
 /src/ray/stats/metric_defs.h @ray-project/ray-core
