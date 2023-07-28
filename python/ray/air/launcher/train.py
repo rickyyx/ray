@@ -7,6 +7,7 @@ import torch.optim as optim
 # Define your model and dataset here
 # For simplicity, we'll just create a simple model and dummy data.
 
+
 class SimpleModel(nn.Module):
     def __init__(self):
         super(SimpleModel, self).__init__()
@@ -14,6 +15,7 @@ class SimpleModel(nn.Module):
 
     def forward(self, x):
         return self.linear(x)
+
 
 def train():
     model = SimpleModel()
@@ -29,5 +31,6 @@ def train():
         optimizer.step()
         print(f"Epoch {epoch+1}, Loss: {loss.item()}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     train()

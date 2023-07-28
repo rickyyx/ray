@@ -1,4 +1,3 @@
-
 import logging
 import os
 import sys
@@ -13,7 +12,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.elastic.rendezvous.utils import _parse_rendezvous_config
 from torch.distributed.elastic.utils import macros
 from torch.distributed.elastic.utils.logging import get_logger
-from torch.distributed.launcher.api import LaunchConfig
+from ray.air.launcher.api import LaunchConfig
 
 
 log = get_logger(__name__)
@@ -234,6 +233,19 @@ def get_args_parser() -> ArgumentParser:
     # Rest from the training program.
     parser.add_argument("training_script_args", nargs=REMAINDER)
 
+    # Ray specific arguments
+    parser.add_argument(
+        "--pwd",
+        type=str,
+        default=".",
+        help="Abs path of working directory that contains files and scripts to be setup on each node.",
+    )
+
+    # Backend specific arguments
+    # TODO(rickyx): this?
+    # parser.add_argument(
+    #     "torch_backend", type=str, help="Torch backend to use for distributed training, e.g. gloo, nccl.")
+
     return parser
 
 
@@ -277,13 +289,16 @@ def determine_local_world_size(nproc_per_node: str):
                 num_proc = os.cpu_count()
                 device_type = "cpu"
         else:
-            raise ValueError(f"Unsupported nproc_per_node value: {nproc_per_node}") from e
+            raise ValueError(
+                f"Unsupported nproc_per_node value: {nproc_per_node}"
+            ) from e
 
         log.info(
-            "Using nproc_per_node=%s,"
-            " setting to %s since the instance "
-            "has %s %s",
-            nproc_per_node, num_proc, os.cpu_count(), device_type
+            "Using nproc_per_node=%s," " setting to %s since the instance " "has %s %s",
+            nproc_per_node,
+            num_proc,
+            os.cpu_count(),
+            device_type,
         )
         return num_proc
 
@@ -329,7 +344,7 @@ def config_from_args(args) -> Tuple[LaunchConfig, Union[Callable, str], List[str
             "please further tune the variable for optimal performance in "
             "your application as needed. \n"
             "*****************************************",
-            omp_num_threads
+            omp_num_threads,
         )
         # This env variable will be passed down to the subprocesses
         os.environ["OMP_NUM_THREADS"] = str(omp_num_threads)
@@ -356,6 +371,7 @@ def config_from_args(args) -> Tuple[LaunchConfig, Union[Callable, str], List[str
         redirects=Std.from_str(args.redirects),
         tee=Std.from_str(args.tee),
         log_dir=args.log_dir,
+        pwd=args.pwd,
     )
 
     with_python = not args.no_python
@@ -400,6 +416,7 @@ def run_script_path(training_script: str, *training_script_args: str):
 
 def run(args):
     from ray.air.launcher.api import elastic_launch
+
     if args.standalone:
         args.rdzv_backend = "c10d"
         args.rdzv_endpoint = "localhost:29400"
@@ -411,7 +428,9 @@ def run(args):
             "--rdzv-endpoint=%s "
             "--rdzv-id=%s\n"
             "**************************************\n",
-            args.rdzv_backend, args.rdzv_endpoint, args.rdzv_id
+            args.rdzv_backend,
+            args.rdzv_endpoint,
+            args.rdzv_id,
         )
 
     config, cmd, cmd_args = config_from_args(args)
