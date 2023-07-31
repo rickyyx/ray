@@ -12,6 +12,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.elastic.rendezvous.utils import _parse_rendezvous_config
 from torch.distributed.elastic.utils import macros
 from torch.distributed.elastic.utils.logging import get_logger
+import ray
 from ray.air.launcher.api import LaunchConfig
 
 
@@ -268,26 +269,70 @@ def parse_min_max_nnodes(nnodes: str):
     return min_nodes, max_nodes
 
 
+def get_num_cpu_per_node():
+    nodes = ray.nodes()
+
+    for n in nodes:
+        if n["Alive"]:
+            return n["Resources"].get("CPU", 0)
+
+def get_num_gpu_per_node():
+    nodes = ray.nodes()
+
+    for n in nodes:
+        if n["Alive"]:
+            return n["Resources"].get("CPU", 0)
+
+
+def get_num_cpu_cluster():
+    resources = ray.cluster_resources()
+    return resources.get("CPU", 0)
+
+def get_num_gpu_cluster():
+    resources = ray.cluster_resources()
+    return resources.get("GPU", 0)
+    
+
 def determine_local_world_size(nproc_per_node: str):
+    worker_resources = {}
+
+    num_cpus_per_node = get_num_cpu_per_node()
+    num_gpus_per_node = get_num_gpu_per_node()
+
     try:
         logging.info("Using nproc_per_node=%s.", nproc_per_node)
-        return int(nproc_per_node)
+        # Assuming homogenous cluster (this is torchrun's limit)
+        nproc_per_node = int(nproc_per_node)
+        
+        num_cpus_per_worker = num_cpus_per_node // nproc_per_node
+        worker_resources = {"CPU": num_cpus_per_worker}
+        if num_gpus_per_node:
+            num_gpus_per_worker = num_gpus_per_node // nproc_per_node
+            worker_resources["GPU"] = num_gpus_per_worker
+        return int(nproc_per_node), worker_resources
     except ValueError as e:
         if nproc_per_node == "cpu":
-            num_proc = os.cpu_count()
+            num_proc = num_cpus_per_node
             device_type = "cpu"
+            worker_resources["CPU"] = 1
         elif nproc_per_node == "gpu":
             if not torch.cuda.is_available():
                 raise ValueError("Cuda is not available.") from e
+
+            if num_gpus_per_node == 0:
+                raise ValueError("GPU is not available on every node.") from e
             device_type = "gpu"
-            num_proc = torch.cuda.device_count()
+            num_proc = num_gpus_per_node
+            worker_resources["GPU"] = 1
         elif nproc_per_node == "auto":
-            if torch.cuda.is_available():
-                num_proc = torch.cuda.device_count()
+            if torch.cuda.is_available() and num_gpus_per_node > 0:
+                num_proc = num_gpus_per_node
                 device_type = "gpu"
+                worker_resources["GPU"] = 1
             else:
-                num_proc = os.cpu_count()
+                num_proc = num_cpus_per_node
                 device_type = "cpu"
+                worker_resources["CPU"] = 1
         else:
             raise ValueError(
                 f"Unsupported nproc_per_node value: {nproc_per_node}"
@@ -297,10 +342,10 @@ def determine_local_world_size(nproc_per_node: str):
             "Using nproc_per_node=%s," " setting to %s since the instance " "has %s %s",
             nproc_per_node,
             num_proc,
-            os.cpu_count(),
+            num_cpus_per_node,
             device_type,
         )
-        return num_proc
+        return num_proc, worker_resources
 
 
 def get_rdzv_endpoint(args):
@@ -334,7 +379,7 @@ def config_from_args(args) -> Tuple[LaunchConfig, Union[Callable, str], List[str
             "is not specified."
         )
 
-    nproc_per_node = determine_local_world_size(args.nproc_per_node)
+    nproc_per_node, resources_per_worker = determine_local_world_size(args.nproc_per_node)
     if "OMP_NUM_THREADS" not in os.environ and nproc_per_node > 1:
         omp_num_threads = 1
         log.warning(
@@ -372,6 +417,7 @@ def config_from_args(args) -> Tuple[LaunchConfig, Union[Callable, str], List[str
         tee=Std.from_str(args.tee),
         log_dir=args.log_dir,
         pwd=args.pwd,
+        resources_per_worker=resources_per_worker,
     )
 
     with_python = not args.no_python
@@ -433,6 +479,10 @@ def run(args):
             args.rdzv_id,
         )
 
+    # initialize the ray runtime here
+    ray.init(
+        runtime_env={"working_dir": os.path.abspath(args.pwd)},
+    )
     config, cmd, cmd_args = config_from_args(args)
     elastic_launch(
         config=config,

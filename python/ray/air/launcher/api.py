@@ -77,6 +77,7 @@ class LaunchConfig:
     metrics_cfg: Dict[str, str] = field(default_factory=dict)
     local_addr: Optional[str] = None
     pwd: Optional[str] = "."
+    resources_per_worker: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         default_timeout = 900
@@ -126,22 +127,9 @@ class elastic_launch:
             trainer_resources={"CPU": 0},
             num_workers=self._config.min_nodes * self._config.nproc_per_node,
             use_gpu=False,
-            placement_strategy="SPREAD",
+            resources_per_worker=self._config.resources_per_worker,
         )
     
-
-        # We cannot really enforce number of workers per node with above ^
-        # Below is how we spread workers with resource calculation.
-        # import psutil
-        # # NOTE(rickyx): Assuming homogeneous nodes here.
-        # num_cpus_per_node = psutil.cpu_count(logical=False)
-        # return ScalingConfig(
-        #     trainer_resources={"CPU": 0},
-        #     num_workers=self._config.min_nodes * self._config.nproc_per_node,
-        #     resources_per_worker={"CPU": min(num_cpus_per_node // self._config.nproc_per_node, 1)},
-        #     use_gpu=False,
-        # )
-
 
 
     def __call__(self, *args):
@@ -150,17 +138,16 @@ class elastic_launch:
                 self._entrypoint(*args)
             else:
                 commands = [self._entrypoint] + list(args)
-                subprocess.run(commands, check=True, capture_output=True)
-            session.report({"msg:": "Finished training!"})
+                try:
+                    proc = subprocess.run(commands, check=True, capture_output=True, text=True)
+                    print(proc.stdout)
+                except subprocess.CalledProcessError as e:
+                    logger.error(e.stderr)
+                    session.report({"error": e.output, "stdout": e.stdout, "stderr": e.stderr})
 
         scaling_config = self.get_scaling_config()
 
         logger.info(f"Scaling config: {scaling_config}")
-        # initialize the ray runtime here
-        ray.init(
-            num_cpus=scaling_config.num_workers,
-            runtime_env={"working_dir": os.path.abspath(self._config.pwd)},
-        )
         logger.info(
             f"Ray runtime initialized with {scaling_config.num_workers} cpus, working dir {os.path.abspath(self._config.pwd)}"
         )
@@ -173,3 +160,5 @@ class elastic_launch:
 
         result = trainer.fit()
         print(result.metrics)
+
+
