@@ -15,9 +15,9 @@ class Provider(Enum):
     LOCAL = 6
 
 
-class NodeProviderConfig(object):
+class AutoscalerConfig(object):
     """
-    NodeProviderConfig is the helper class to provide instance
+    AutoscalerConfig is the helper class to provide autoscaler
     related configs.
     """
 
