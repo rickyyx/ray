@@ -1260,6 +1260,8 @@ class CoreWorker : public rpc::CoreWorkerServiceHandler {
                      rpc::LocalGCReply *reply,
                      rpc::SendReplyCallback send_reply_callback) override;
 
+  // comments
+
   /// Delete objects explicitly.
   void HandleDeleteObjects(rpc::DeleteObjectsRequest request,
                            rpc::DeleteObjectsReply *reply,

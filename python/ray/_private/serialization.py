@@ -216,6 +216,14 @@ class SerializationContext:
         # cloudpickle does not provide error types
         except pickle.pickle.PicklingError:
             raise DeserializationError()
+
+        # import dataclasses
+
+        # for o in obj:
+        #     if dataclasses.is_dataclass(o):
+        #         for v, f in o.__dataclass_fields__.items():
+        #             f._field_type = dataclasses._FIELD
+
         return obj
 
     def _deserialize_msgpack_data(self, data, metadata_fields):

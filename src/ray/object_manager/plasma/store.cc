@@ -315,7 +315,7 @@ void PlasmaStore::ConnectClient(const boost::system::error_code &error) {
   }
 
   if (error != boost::asio::error::operation_aborted) {
-    // We're ready to accept another client.
+    // We're ready to accept another client. hihihi
     DoAccept();
   }
 }
