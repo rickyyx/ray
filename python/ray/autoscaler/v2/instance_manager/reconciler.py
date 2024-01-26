@@ -1,23 +1,22 @@
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass
-import time
 from typing import Dict, List, Optional
-from ray.autoscaler.v2.instance_manager.config import InstanceReconcileConfig
+
 from ray.autoscaler.v2.instance_manager.common import InstanceUtil
+from ray.autoscaler.v2.instance_manager.config import InstanceReconcileConfig
 from ray.autoscaler.v2.instance_manager.node_provider import (
     CloudInstance,
     CloudInstanceId,
     CloudInstanceProviderError,
     ICloudInstanceProvider,
 )
-
+from ray.core.generated.autoscaler_pb2 import ClusterResourceState
+from ray.core.generated.instance_manager_pb2 import Instance as IMInstance
 from ray.core.generated.instance_manager_pb2 import (
     InstanceUpdateEvent as IMInstanceUpdateEvent,
-    Instance as IMInstance,
 )
-from ray.core.generated.autoscaler_pb2 import ClusterResourceState
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ class StuckInstanceReconciler(IReconciler):
     @staticmethod
     def reconcile(
         instances: List[IMInstance],
-        instance_reconcile_config: InstanceReconcileConfig,
+        config: InstanceReconcileConfig,
         _logger: logging.Logger = logger,
     ) -> Dict[str, IMInstanceUpdateEvent]:
         """
@@ -74,9 +73,9 @@ class StuckInstanceReconciler(IReconciler):
                 able to start ray for some reason (e.g. immediate crash after ray start)
             ACTION: We will fail the installation and terminate the instance after a
                 timeout, transitioning to RAY_INSTALL_FAILED.
-        
-        # TODO(rickyx): Maybe we should add a TO_STOP status so we could do retry stopping
-        # better
+
+        # TODO(rickyx): Maybe we should add a TO_STOP status so we could do retry
+        # stopping better
         - STOPPING -> STOPPING
             WHEN: the cloud node provider taking long or failed to terminate the cloud
                 instance.
@@ -134,25 +133,25 @@ class StuckInstanceReconciler(IReconciler):
         im_updates.update(
             StuckInstanceReconciler._reconcile_requested(
                 instances_by_status[IMInstance.REQUESTED],
-                request_status_timeout_s=instance_reconcile_config.request_status_timeout_s,
-                max_num_request_to_allocate=instance_reconcile_config.max_num_request_to_allocate,
+                request_status_timeout_s=config.request_status_timeout_s,
+                max_num_request_to_allocate=config.max_num_request_to_allocate,
             )
         )
         for cur_status, next_status, timeout in [
             (
                 IMInstance.ALLOCATED,
                 IMInstance.STOPPING,
-                instance_reconcile_config.allocate_status_timeout_s,
+                config.allocate_status_timeout_s,
             ),
             (
                 IMInstance.RAY_INSTALLING,
                 IMInstance.RAY_INSTALL_FAILED,
-                instance_reconcile_config.ray_install_status_timeout_s,
+                config.ray_install_status_timeout_s,
             ),
             (
                 IMInstance.STOPPING,
                 IMInstance.STOPPING,
-                instance_reconcile_config.stopping_status_timeout_s,
+                config.stopping_status_timeout_s,
             ),
         ]:
             im_updates.update(
@@ -173,7 +172,7 @@ class StuckInstanceReconciler(IReconciler):
             StuckInstanceReconciler._warn_transient_status(
                 instances_by_status[status],
                 status=status,
-                warn_interval_s=instance_reconcile_config.transient_status_warn_interval_s,
+                warn_interval_s=config.transient_status_warn_interval_s,
                 logger=_logger,
             )
 
@@ -212,7 +211,8 @@ class StuckInstanceReconciler(IReconciler):
                 return IMInstanceUpdateEvent(
                     instance_id=instance.instance_id,
                     new_instance_status=IMInstance.QUEUED,
-                    details=f"Retry allocation after timeout = {request_status_timeout_s}s",
+                    details="Retry allocation after "
+                    "timeout={request_status_timeout_s}s",
                 )
             return None
 
@@ -231,15 +231,17 @@ class StuckInstanceReconciler(IReconciler):
         cur_status: IMInstance.InstanceStatus,
         new_status: IMInstance.InstanceStatus,
     ) -> Dict[str, IMInstanceUpdateEvent]:
-        """Change any instances that have not transitioned to the new status to the new status."""
+        """Change any instances that have not transitioned to the new status
+        to the new status."""
         updates = {}
         for instance in instances:
             status_times_ns = InstanceUtil.get_status_transition_times_ns(
                 instance, select_instance_status=cur_status
             )
-            assert (
-                len(status_times_ns) == 1
-            ), f"instance {instance.instance_id} has {len(status_times_ns)} {IMInstance.InstanceStatus.Name(cur_status)} status"
+            assert len(status_times_ns) == 1, (
+                f"instance {instance.instance_id} has {len(status_times_ns)} "
+                f"{IMInstance.InstanceStatus.Name(cur_status)} status"
+            )
 
             status_time_ns = status_times_ns[0]
 
@@ -248,8 +250,11 @@ class StuckInstanceReconciler(IReconciler):
                     instance_id=instance.instance_id,
                     new_instance_status=new_status,
                     details=(
-                        f"Failed to transition from {IMInstance.InstanceStatus.Name(cur_status)} after {status_timeout_s}s. "
-                        f"Transitioning to {IMInstance.InstanceStatus.Name(new_status)}."
+                        "Failed to transition from "
+                        f"{IMInstance.InstanceStatus.Name(cur_status)} after "
+                        f"{status_timeout_s}s. "
+                        "Transitioning to "
+                        f"{IMInstance.InstanceStatus.Name(new_status)}."
                     ),
                 )
 
@@ -272,7 +277,8 @@ class StuckInstanceReconciler(IReconciler):
 
             if time.time_ns() - status_time_ns > warn_interval_s * 1e9:
                 logger.warning(
-                    f"Instance {instance.instance_id} is stuck in {IMInstance.InstanceStatus.Name(status)} for too long."
+                    f"Instance {instance.instance_id} is stuck in "
+                    f"{IMInstance.InstanceStatus.Name(status)} for too long."
                 )
 
 
@@ -350,8 +356,8 @@ class CloudProviderReconciler(IReconciler):
         # Find all launch errors by launch request id.
 
         # For the same request, transition the instance to ALLOCATION_FAILED.
-        # TODO(rickyx): we don't differentiate transient errors (which might be retryable)
-        # and permanent errors (which are not retryable).
+        # TODO(rickyx): we don't differentiate transient errors (which might be
+        # retryable) and permanent errors (which are not retryable).
         pass
 
     @staticmethod

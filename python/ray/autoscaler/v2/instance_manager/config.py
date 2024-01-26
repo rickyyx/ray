@@ -5,10 +5,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from ray._private.ray_constants import env_integer
 
 import yaml
 
+from ray._private.ray_constants import env_integer
 from ray.autoscaler._private.util import (
     hash_runtime_conf,
     prepare_config,

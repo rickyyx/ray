@@ -2,16 +2,15 @@
 import os
 import sys
 import unittest
-import mock
 
 import pytest  # noqa
 
+import mock
+
 from ray.autoscaler.v2.instance_manager.config import InstanceReconcileConfig
-from ray.autoscaler.v2.tests.util import create_instance
-
 from ray.autoscaler.v2.instance_manager.reconciler import StuckInstanceReconciler
+from ray.autoscaler.v2.tests.util import create_instance
 from ray.core.generated.instance_manager_pb2 import Instance
-
 
 s_to_ns = int(1e9)
 

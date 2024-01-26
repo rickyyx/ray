@@ -224,8 +224,9 @@ class InstanceUtil:
                 # When a cloud instance no longer appears in the list of running cloud
                 # instances from the node provider.
                 Instance.STOPPED,
-                # When we retry stopping the cloud instance. We transition it to STOPPING
-                # again to trigger the node provider to stop the cloud instance.
+                # When we retry stopping the cloud instance. We transition it to
+                # STOPPING again to trigger the node provider to stop the cloud
+                # instance.
                 Instance.STOPPING,
             },
             # Whenever a cloud instance disappears from the list of running cloud
