@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from ray._private.ray_constants import env_integer
 
 import yaml
 
@@ -63,6 +64,44 @@ class NodeTypeConfig:
     def __post_init__(self):
         assert self.min_worker_nodes <= self.max_worker_nodes
         assert self.min_worker_nodes >= 0
+
+
+DEFAULT_REQUEST_STATUS_TIMEOUT_S = env_integer(
+    "RAY_AUTOSCALER_DEFAULT_REQUEST_STATUS_TIMEOUT_S", 300
+)
+DEFAULT_ALLOCATE_STATUS_TIMEOUT_S = env_integer(
+    "RAY_AUTOSCALER_DEFAULT_ALLOCATE_STATUS_TIMEOUT_S", 300
+)
+DEFAULT_RAY_INSTALL_STATUS_TIMEOUT_S = env_integer(
+    "RAY_AUTOSCALER_DEFAULT_RAY_INSTALL_STATUS_TIMEOUT_S", 300
+)
+DEFAULT_STOPPING_STATUS_TIMEOUT_S = env_integer(
+    "RAY_AUTOSCALER_DEFAULT_STOPPING_STATUS_TIMEOUT_S", 300
+)
+DEFAULT_MAX_NUM_REQUEST_TO_ALLOCATE = env_integer(
+    "RAY_AUTOSCALER_DEFAULT_MAX_NUM_REQUEST_TO_ALLOCATE", 3
+)
+DEFAULT_TRANSIENT_STATUS_WARN_INTERVAL_S = env_integer(
+    "RAY_AUTOSCALER_DEFAULT_TRANSIENT_STATUS_WARN_INTERVAL_S", 90
+)
+
+
+@dataclass(frozen=True)
+class InstanceReconcileConfig:
+
+    # The timeout for waiting for a REQUESTED instance to be ALLOCATED.
+    request_status_timeout_s: int = DEFAULT_REQUEST_STATUS_TIMEOUT_S
+    # The timeout for waiting for a ALLOCATED instance to be RAY_RUNNING.
+    allocate_status_timeout_s: int = DEFAULT_ALLOCATE_STATUS_TIMEOUT_S
+    # The timeout for waiting for a RAY_INSTALLING instance to be RAY_RUNNING.
+    ray_install_status_timeout_s: int = DEFAULT_RAY_INSTALL_STATUS_TIMEOUT_S
+    # The timeout for waiting for a STOPPING instance to be STOPPED.
+    stopping_status_timeout_s: int = DEFAULT_STOPPING_STATUS_TIMEOUT_S
+    # The interval for raise a warning when an instance in transient status
+    # is not updated for a long time.
+    transient_status_warn_interval_s: int = DEFAULT_TRANSIENT_STATUS_WARN_INTERVAL_S
+    # The number of times to retry requesting to allocate an instance.
+    max_num_request_to_allocate: int = DEFAULT_MAX_NUM_REQUEST_TO_ALLOCATE
 
 
 class AutoscalingConfig:

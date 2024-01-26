@@ -99,7 +99,7 @@ class InstanceUtilTest(unittest.TestCase):
         assert g[Instance.RAY_STOPPED] == {Instance.STOPPED, Instance.STOPPING}
         all_status.remove(Instance.RAY_STOPPED)
 
-        assert g[Instance.STOPPING] == {Instance.STOPPED}
+        assert g[Instance.STOPPING] == {Instance.STOPPED, Instance.STOPPING}
         all_status.remove(Instance.STOPPING)
 
         assert g[Instance.STOPPED] == set()

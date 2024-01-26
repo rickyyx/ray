@@ -2,78 +2,170 @@
 import os
 import sys
 import unittest
+import mock
 
 import pytest  # noqa
 
-from ray._private.test_utils import load_test_config
-from ray.autoscaler._private.event_summarizer import EventSummarizer
-from ray.autoscaler._private.node_launcher import BaseNodeLauncher
-from ray.autoscaler._private.node_provider_availability_tracker import (
-    NodeProviderAvailabilityTracker,
-)
-from ray.autoscaler.v2.instance_manager.config import AutoscalingConfig
-from ray.autoscaler.v2.instance_manager.instance_storage import InstanceStorage
-from ray.autoscaler.v2.instance_manager.node_provider import NodeProviderAdapter
-from ray.autoscaler.v2.instance_manager.storage import InMemoryStorage
-from ray.autoscaler.v2.instance_manager.subscribers.reconciler import InstanceReconciler
-from ray.autoscaler.v2.tests.util import FakeCounter
+from ray.autoscaler.v2.instance_manager.config import InstanceReconcileConfig
+from ray.autoscaler.v2.tests.util import create_instance
+
+from ray.autoscaler.v2.instance_manager.reconciler import StuckInstanceReconciler
 from ray.core.generated.instance_manager_pb2 import Instance
-from ray.tests.autoscaler_test_utils import MockProvider
 
 
-class InstanceReconcilerTest(unittest.TestCase):
-    def setUp(self):
-        self.base_provider = MockProvider()
-        self.availability_tracker = NodeProviderAvailabilityTracker()
-        self.node_launcher = BaseNodeLauncher(
-            self.base_provider,
-            FakeCounter(),
-            EventSummarizer(),
-            self.availability_tracker,
-        )
-        self.config = AutoscalingConfig(load_test_config("test_ray_complex.yaml"))
-        self.node_provider = NodeProviderAdapter(
-            self.base_provider, self.node_launcher, self.config
-        )
+s_to_ns = int(1e9)
 
-        self.instance_storage = InstanceStorage(
-            cluster_id="test_cluster_id",
-            storage=InMemoryStorage(),
-        )
-        self.reconciler = InstanceReconciler(
-            instance_storage=self.instance_storage,
-            node_provider=self.node_provider,
-        )
 
-    def tearDown(self):
-        self.reconciler.shutdown()
+@mock.patch("time.time_ns", mock.MagicMock(return_value=10 * s_to_ns))
+def test_stuck_requested_instances():
+    config = InstanceReconcileConfig(
+        request_status_timeout_s=5,
+        max_num_request_to_allocate=2,
+    )
+    instances = [
+        create_instance(
+            "no-update",
+            Instance.REQUESTED,
+            status_times=[(Instance.REQUESTED, 9 * s_to_ns)],
+        ),
+        create_instance(
+            "retry",
+            Instance.REQUESTED,
+            status_times=[(Instance.REQUESTED, 2 * s_to_ns)],
+        ),
+        create_instance(
+            "failed",
+            Instance.REQUESTED,
+            status_times=[
+                (Instance.REQUESTED, 1 * s_to_ns),
+                (Instance.REQUESTED, 2 * s_to_ns),
+            ],
+        ),
+        create_instance(
+            "success",
+            Instance.ALLOCATED,
+            status_times=[
+                (Instance.REQUESTED, 1 * s_to_ns),
+                (Instance.ALLOCATED, 2 * s_to_ns),
+            ],
+        ),
+    ]
+    updates = StuckInstanceReconciler.reconcile(instances, config)
+    expected_status = {
+        "retry": Instance.QUEUED,
+        "failed": Instance.ALLOCATION_FAILED,
+    }
+    assert expected_status == {
+        update.instance_id: update.new_instance_status for _, update in updates.items()
+    }
 
-    def test_handle_ray_failure(self):
-        self.node_provider.create_nodes("worker_nodes1", 1)
-        instance = Instance(
-            instance_id="0",
-            instance_type="worker_nodes1",
-            cloud_instance_id="0",
-            status=Instance.RAY_STOPPED,
-        )
-        assert not self.base_provider.is_terminated(instance.cloud_instance_id)
-        success, verison = self.instance_storage.upsert_instance(instance)
-        assert success
-        instance.version = verison
-        self.reconciler._handle_ray_failure([instance.instance_id])
 
-        instances, _ = self.instance_storage.get_instances(
-            instance_ids={instance.instance_id}
-        )
-        assert instances[instance.instance_id].status == Instance.STOPPING
-        assert self.base_provider.is_terminated(instance.cloud_instance_id)
+@unittest.mock.patch("time.time_ns")
+@pytest.mark.parametrize(
+    "cur_status,expect_status",
+    [
+        (Instance.ALLOCATED, Instance.STOPPING),
+        (Instance.RAY_INSTALLING, Instance.RAY_INSTALL_FAILED),
+        (Instance.STOPPING, Instance.STOPPING),
+    ],
+)
+def test_stuck_allocated_instances(mock_time_ns, cur_status, expect_status):
+    timeout_s = 5
+    cur_time_s = 20
+    mock_time_ns.return_value = cur_time_s * s_to_ns
+    config = InstanceReconcileConfig(
+        allocate_status_timeout_s=timeout_s,
+        stopping_status_timeout_s=timeout_s,
+        ray_install_status_timeout_s=timeout_s,
+    )
+    instances = [
+        create_instance(
+            "no-update",
+            cur_status,
+            status_times=[(cur_status, (cur_time_s - timeout_s + 1) * s_to_ns)],
+        ),
+        create_instance(
+            "updated",
+            cur_status,
+            status_times=[(cur_status, (cur_time_s - timeout_s - 1) * s_to_ns)],
+        ),
+    ]
+    updates = StuckInstanceReconciler.reconcile(instances, config)
+    print(updates)
+    expected_status = {
+        "updated": expect_status,
+    }
+    assert expected_status == {
+        update.instance_id: update.new_instance_status for _, update in updates.items()
+    }
 
-        # reconciler will detect the node is terminated and update the status.
-        self.reconciler._reconcile_with_node_provider()
-        instances, _ = self.instance_storage.get_instances(
-            instance_ids={instance.instance_id}
+
+@unittest.mock.patch("time.time_ns")
+def test_warn_stuck_transient_instances(mock_time_ns):
+    cur_time_s = 10
+    mock_time_ns.return_value = cur_time_s * s_to_ns
+    timeout_s = 5
+
+    config = InstanceReconcileConfig(
+        transient_status_warn_interval_s=timeout_s,
+    )
+    status = Instance.RAY_STOPPING
+    instances = [
+        create_instance(
+            "no-warn",
+            status,
+            status_times=[(status, (cur_time_s - timeout_s + 1) * s_to_ns)],
+        ),
+        create_instance(
+            "warn",
+            status,
+            status_times=[(status, (cur_time_s - timeout_s - 1) * s_to_ns)],
+        ),
+    ]
+    mock_logger = mock.MagicMock()
+    updates = StuckInstanceReconciler.reconcile(instances, config, _logger=mock_logger)
+    print(updates)
+    assert updates == {}
+    assert mock_logger.warning.call_count == 1
+    assert "Instance warn is stuck" in mock_logger.warning.call_args[0][0]
+
+
+@unittest.mock.patch("time.time_ns")
+def test_stuck_instances_no_op(mock_time_ns):
+    # Large enough to not trigger any timeouts
+    mock_time_ns.return_value = 999999 * s_to_ns
+
+    config = InstanceReconcileConfig()
+
+    all_status = set(Instance.InstanceStatus.values())
+    reconciled_stuck_statuses = {
+        Instance.REQUESTED,
+        Instance.ALLOCATED,
+        Instance.RAY_INSTALLING,
+        Instance.STOPPING,
+    }
+    transient_statuses = {
+        Instance.RAY_STOPPING,
+        Instance.RAY_INSTALL_FAILED,
+        Instance.RAY_STOPPED,
+        Instance.QUEUED,
+    }
+    no_op_statuses = all_status - reconciled_stuck_statuses - transient_statuses
+
+    for status in no_op_statuses:
+        instances = [
+            create_instance(
+                "no-op",
+                status,
+                status_times=[(status, 1 * s_to_ns)],
+            ),
+        ]
+        mock_logger = mock.MagicMock()
+        updates = StuckInstanceReconciler.reconcile(
+            instances, config, _logger=mock_logger
         )
-        assert instances[instance.instance_id].status == Instance.STOPPED
+        assert updates == {}
+        assert mock_logger.warning.call_count == 0
 
 
 if __name__ == "__main__":
