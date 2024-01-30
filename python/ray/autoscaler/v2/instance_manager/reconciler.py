@@ -1,3 +1,4 @@
+from collections import defaultdict
 import logging
 from abc import ABC, abstractmethod
 from typing import Dict, List
@@ -7,6 +8,7 @@ from ray.autoscaler.v2.instance_manager.node_provider import (
     CloudInstanceId,
     CloudInstanceProviderError,
     ICloudInstanceProvider,
+    LaunchNodeError,
 )
 from ray.core.generated.autoscaler_pb2 import ClusterResourceState
 from ray.core.generated.instance_manager_pb2 import Instance as IMInstance
@@ -158,28 +160,164 @@ class CloudProviderReconciler(IReconciler):
         4. to STOPPING: when an instance being terminated fails to be terminated
             for some reasons, we will retry the termination.
         """
-        pass
+
+        # Find all non-terminated cloud nodes by launch request id.
+        non_terminated_cloud_instances = provider.get_non_terminated()
+        cloud_provider_errors = provider.poll_errors()
+        instances_by_status = defaultdict(list)
+        instances_with_cloud_instances_assigned = {}
+
+        for instance in instances:
+            instances_by_status[instance.status].append(instance)
+            if instance.cloud_instance_id:
+                instances_with_cloud_instances_assigned[
+                    instance.cloud_instance_id
+                ] = instance
+
+        unassigned_cloud_instances = {
+            cloud_instance_id: cloud_instance
+            for cloud_instance_id, cloud_instance in non_terminated_cloud_instances.items()
+            if cloud_instance_id not in instances_with_cloud_instances_assigned.keys()
+        }
+
+        # Reconcile the states.
+        updates = {}
+        updates.update(
+            CloudProviderReconciler._reconcile_allocation(
+                cloud_provider_errors,
+                unassigned_cloud_instances,
+                instances_by_status[IMInstance.REQUESTED],
+            )
+        )
+        updates.update(
+            CloudProviderReconciler._reconcile_stopped(
+                instances_with_cloud_instances_assigned,
+                non_terminated_cloud_instances.keys(),
+            )
+        )
+        updates.update(
+            CloudProviderReconciler._reconcile_failed_to_terminate(
+                cloud_provider_errors
+            )
+        )
+
+        return updates
 
     @staticmethod
-    def _reconcile_allocated(
-        non_terminated_cloud_nodes: Dict[CloudInstanceId, CloudInstance]
+    def _reconcile_allocation(
+        cloud_provider_errors: List[CloudInstanceProviderError],
+        unassigned_non_terminated_cloud_instances: Dict[CloudInstanceId, CloudInstance],
+        requested_instances: List[IMInstance],
     ) -> Dict[str, IMInstanceUpdateEvent]:
-
         """
-        For any REQUESTED instances, if there's any unassigned non-terminated
-        cloud instance that matches the instance type from the same request,
-        assign it and transition it to ALLOCATED.
+        For any REQUESTED instances, if there's unassigned cloud instances, we will
+        update it to ALLOCATED. If there's launch errors, we will transition the
+        instance to ALLOCATION_FAILED.
 
+        Args:
+            cloud_provider_errors: A list of cloud provider errors.
+            unassigned_non_terminated_cloud_instances: A dict of unassigned
+                non-terminated cloud instances.
+            requested_instances: A list of requested instances.
+
+        Returns:
+            A dict of instance id to instance update event.
         """
+        cloud_instances_by_request = defaultdict(list)
+        launch_errors_by_request = defaultdict(list)
+        instances_by_request = defaultdict(list)
+        updates = {}
 
-        # Find all requested instances, by launch request id.
+        for instance in requested_instances:
+            instances_by_request[instance.launch_request_id].append(instance)
 
-        # Find all non_terminated cloud_nodes by launch request id.
+        for error in cloud_provider_errors:
+            if isinstance(error, LaunchNodeError):
+                launch_errors_by_request[error.request_id].append(error)
 
-        # For the same request, find any unassigned non-terminated cloud instance
-        # that matches the instance type. Assign them to REQUESTED instances
-        # and transition them to ALLOCATED.
-        pass
+        for cloud_instance in unassigned_non_terminated_cloud_instances.values():
+            cloud_instances_by_request[cloud_instance.request_id].append(cloud_instance)
+
+        for request_id, instances in instances_by_request.items():
+            cloud_instances = cloud_instances_by_request[request_id]
+            launch_errors = launch_errors_by_request[request_id]
+
+            cloud_instances_by_type = defaultdict(list)
+            launch_errors_by_type = defaultdict(list)
+            instances_by_type = defaultdict(list)
+
+            for cloud_instance in cloud_instances:
+                cloud_instances_by_type[cloud_instance.instance_type].append(
+                    cloud_instance
+                )
+            for error in launch_errors:
+                # We un-flatten the errors by count for easier matching of error to
+                # instances.
+                launch_errors_by_type[error.node_type].extend([error] * error.count)
+
+            for instance in instances:
+                instances_by_type[instance.instance_type].append(instance)
+
+            for instance_type, instances in instances_by_type.items():
+                updates.update(
+                    CloudProviderReconciler._allocate_or_fail_for_type(
+                        instance_type,
+                        instances,
+                        cloud_instances_by_type[instance_type],
+                        launch_errors_by_type[instance_type],
+                    )
+                )
+
+        return updates
+
+    @staticmethod
+    def _allocate_or_fail_for_type(
+        instance_type: str,
+        instances: List[IMInstance],
+        cloud_instances: List[CloudInstance],
+        launch_errors: List[LaunchNodeError],
+    ) -> Dict[str, IMInstanceUpdateEvent]:
+        """
+        Allocate or fail instances of a specific type.
+
+        Args:
+            instance_type: The instance type.
+            instances: A list of instances.
+            cloud_instances: A list of cloud instances.
+            launch_errors: A list of launch errors.
+
+        Returns:
+            A dict of instance id to instance update event.
+        """
+        updates = {}
+        for instance in instances:
+            # Try to allocate the cloud instance.
+            if cloud_instances:
+                cloud_instance = cloud_instances.pop()
+                updates[instance.instance_id] = IMInstanceUpdateEvent(
+                    instance_id=instance.instance_id,
+                    new_instance_status=IMInstance.ALLOCATED,
+                    cloud_instance_id=cloud_instance.instance_id,
+                )
+                continue
+
+            # Fail the requested instance if there's launch error.
+            if launch_errors:
+                error = launch_errors.pop()
+                updates[instance.instance_id] = IMInstanceUpdateEvent(
+                    instance_id=instance.instance_id,
+                    new_instance_status=IMInstance.ALLOCATION_FAILED,
+                    details=error.details,
+                )
+                continue
+
+            # No cloud instance or launch error, we will retry later.
+            logger.debug(
+                f"Instance {instance.instance_id} of type {instance_type} is still "
+                f"being launched."
+            )
+
+        return updates
 
     @staticmethod
     def _reconcile_failed_to_allocate(
