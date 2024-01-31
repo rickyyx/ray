@@ -1,6 +1,6 @@
-from collections import defaultdict
 import logging
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from typing import Dict, List, Set
 
 from ray.autoscaler.v2.instance_manager.node_provider import (
@@ -9,6 +9,7 @@ from ray.autoscaler.v2.instance_manager.node_provider import (
     CloudInstanceProviderError,
     ICloudInstanceProvider,
     LaunchNodeError,
+    TerminateNodeError,
 )
 from ray.core.generated.autoscaler_pb2 import ClusterResourceState
 from ray.core.generated.instance_manager_pb2 import Instance as IMInstance
@@ -146,13 +147,15 @@ class RayStateReconciler(IReconciler):
 class CloudProviderReconciler(IReconciler):
     @staticmethod
     def reconcile(
-        provider: ICloudInstanceProvider, instances: List[IMInstance]
+        non_terminated_cloud_instances: Dict[CloudInstanceId, CloudInstance],
+        cloud_provider_errors: List[CloudInstanceProviderError],
+        instances: List[IMInstance],
     ) -> List[IMInstanceUpdateEvent]:
         """
         Reconcile the instance storage with the node provider.
         This is responsible for transitioning the instance status of:
-        1. to ALLOCATED: when a REQUESTED instance could be assigned to an unassigned
-            cloud instance.
+        1. to ALLOCATED: when a REQUESTED/QUEUED instance could be assigned to an
+            unassigned cloud instance.
         2. to STOPPED: when an ALLOCATED instance no longer has the assigned cloud
             instance found in node provider.
         3. to ALLOCATION_FAILED: when a REQUESTED instance failed to be assigned to
@@ -162,8 +165,6 @@ class CloudProviderReconciler(IReconciler):
         """
 
         # Find all non-terminated cloud nodes by launch request id.
-        non_terminated_cloud_instances = provider.get_non_terminated()
-        cloud_provider_errors = provider.poll_errors()
         instances_by_status = defaultdict(list)
         instances_with_cloud_instance_assigned = {}
 
@@ -176,29 +177,26 @@ class CloudProviderReconciler(IReconciler):
 
         unassigned_cloud_instances = {
             cloud_instance_id: cloud_instance
-            for cloud_instance_id, cloud_instance in non_terminated_cloud_instances.items()
+            for cloud_instance_id, cloud_instance in non_terminated_cloud_instances.items()  # noqa: E501
             if cloud_instance_id not in instances_with_cloud_instance_assigned.keys()
         }
 
         # Reconcile the states.
-        updates = {}
-        updates.update(
-            CloudProviderReconciler._handle_requested(
-                cloud_provider_errors,
-                unassigned_cloud_instances,
-                instances_by_status[IMInstance.REQUESTED],
-            )
+        updates = []
+        updates += CloudProviderReconciler._handle_requested(
+            cloud_provider_errors,
+            unassigned_cloud_instances,
+            instances_by_status[IMInstance.REQUESTED]
+            # QUEUED instances might have been REQUESTED with retry
+            + instances_by_status[IMInstance.QUEUED],
         )
-        updates.update(
-            CloudProviderReconciler._handle_stopped(
-                instances_with_cloud_instance_assigned,
-                non_terminated_cloud_instances.keys(),
-            )
+        updates += CloudProviderReconciler._handle_stopped(
+            instances_with_cloud_instance_assigned,
+            non_terminated_cloud_instances.keys(),
         )
-        updates.update(
-            CloudProviderReconciler._reconcile_failed_to_terminate(
-                cloud_provider_errors
-            )
+        updates += CloudProviderReconciler._handle_terminate_failures(
+            cloud_provider_errors,
+            instances_by_status[IMInstance.STOPPING],
         )
 
         return updates
@@ -207,10 +205,11 @@ class CloudProviderReconciler(IReconciler):
     def _handle_requested(
         cloud_provider_errors: List[CloudInstanceProviderError],
         unassigned_non_terminated_cloud_instances: Dict[CloudInstanceId, CloudInstance],
-        requested_instances: List[IMInstance],
-    ) -> Dict[str, IMInstanceUpdateEvent]:
+        assignable_instances: List[IMInstance],
+    ) -> List[IMInstanceUpdateEvent]:
         """
-        For any REQUESTED instances, if there's unassigned cloud instances, we will
+        For any non terminated instances that have been requested but don't have
+        any cloud instance id assigned, if there's unassigned cloud instances, we will
         update it to ALLOCATED. If there's launch errors, we will transition the
         instance to ALLOCATION_FAILED.
 
@@ -218,7 +217,8 @@ class CloudProviderReconciler(IReconciler):
             cloud_provider_errors: A list of cloud provider errors.
             unassigned_non_terminated_cloud_instances: A dict of unassigned
                 non-terminated cloud instances.
-            requested_instances: A list of requested instances.
+            assignable_instances: A list of instances which are in REQUESTED or QUEUED
+                state, and could potentially be assigned to a cloud instance.
 
         Returns:
             A dict of instance id to instance update event.
@@ -226,10 +226,11 @@ class CloudProviderReconciler(IReconciler):
         cloud_instances_by_request = defaultdict(list)
         launch_errors_by_request = defaultdict(list)
         instances_by_request = defaultdict(list)
-        updates = {}
+        updates = []
 
-        for instance in requested_instances:
-            instances_by_request[instance.launch_request_id].append(instance)
+        for instance in assignable_instances:
+            if instance.launch_request_id:
+                instances_by_request[instance.launch_request_id].append(instance)
 
         for error in cloud_provider_errors:
             if isinstance(error, LaunchNodeError):
@@ -247,9 +248,7 @@ class CloudProviderReconciler(IReconciler):
             instances_by_type = defaultdict(list)
 
             for cloud_instance in cloud_instances:
-                cloud_instances_by_type[cloud_instance.instance_type].append(
-                    cloud_instance
-                )
+                cloud_instances_by_type[cloud_instance.node_type].append(cloud_instance)
             for error in launch_errors:
                 # We un-flatten the errors by count for easier matching of error to
                 # instances.
@@ -259,13 +258,11 @@ class CloudProviderReconciler(IReconciler):
                 instances_by_type[instance.instance_type].append(instance)
 
             for instance_type, instances in instances_by_type.items():
-                updates.update(
-                    CloudProviderReconciler._allocate_or_fail_for_type(
-                        instance_type,
-                        instances,
-                        cloud_instances_by_type[instance_type],
-                        launch_errors_by_type[instance_type],
-                    )
+                updates += CloudProviderReconciler._allocate_or_fail_for_type(
+                    instance_type,
+                    instances,
+                    cloud_instances_by_type[instance_type],
+                    launch_errors_by_type[instance_type],
                 )
 
         return updates
@@ -289,25 +286,29 @@ class CloudProviderReconciler(IReconciler):
         Returns:
             A dict of instance id to instance update event.
         """
-        updates = {}
+        updates = []
         for instance in instances:
             # Try to allocate the cloud instance.
             if cloud_instances:
                 cloud_instance = cloud_instances.pop()
-                updates[instance.instance_id] = IMInstanceUpdateEvent(
-                    instance_id=instance.instance_id,
-                    new_instance_status=IMInstance.ALLOCATED,
-                    cloud_instance_id=cloud_instance.instance_id,
+                updates.append(
+                    IMInstanceUpdateEvent(
+                        instance_id=instance.instance_id,
+                        new_instance_status=IMInstance.ALLOCATED,
+                        cloud_instance_id=cloud_instance.cloud_instance_id,
+                    )
                 )
                 continue
 
             # Fail the requested instance if there's launch error.
             if launch_errors:
                 error = launch_errors.pop()
-                updates[instance.instance_id] = IMInstanceUpdateEvent(
-                    instance_id=instance.instance_id,
-                    new_instance_status=IMInstance.ALLOCATION_FAILED,
-                    details=error.details,
+                updates.append(
+                    IMInstanceUpdateEvent(
+                        instance_id=instance.instance_id,
+                        new_instance_status=IMInstance.ALLOCATION_FAILED,
+                        details=error.details,
+                    )
                 )
                 continue
 
@@ -334,14 +335,60 @@ class CloudProviderReconciler(IReconciler):
         # Check if any matched cloud instance is still running.
         # If not, transition the instance to STOPPED. (The instance will have the cloud
         # instance id removed, and GCed later.)
-        pass
+        updates = []
+
+        for (
+            cloud_instance_id,
+            instance,
+        ) in instances_with_cloud_instance_assigned.items():
+            if cloud_instance_id in non_terminated_cloud_instance_ids:
+                # The cloud instance is still running.
+                continue
+
+            updates.append(
+                IMInstanceUpdateEvent(
+                    instance_id=instance.instance_id,
+                    new_instance_status=IMInstance.STOPPED,
+                    details=f"Cloud instance {cloud_instance_id} is no longer running.",
+                )
+            )
+
+        return updates
 
     @staticmethod
-    def _reconcile_failed_to_terminate(
+    def _handle_terminate_failures(
         cloud_provider_errors: List[CloudInstanceProviderError],
+        terminating_instances: List[IMInstance],
     ) -> List[IMInstanceUpdateEvent]:
         """
         For any STOPPING instances, if there's errors in terminating the cloud instance,
         we will retry the termination by setting it to STOPPING again.
         """
-        pass
+        terminate_failures = [
+            error
+            for error in cloud_provider_errors
+            if isinstance(error, TerminateNodeError)
+        ]
+
+        terminating_instances_by_cloud_instance_id = {
+            instance.cloud_instance_id: instance for instance in terminating_instances
+        }
+        updates = []
+        for failure in terminate_failures:
+            instance = terminating_instances_by_cloud_instance_id.get(
+                failure.cloud_instance_id
+            )
+            if instance:
+                err_msg = (
+                    f"Failed to terminate instance {instance.instance_id} with error: "
+                    f"{failure.details}. Retrying termination."
+                )
+                logger.info(err_msg)
+                updates.append(
+                    IMInstanceUpdateEvent(
+                        instance_id=instance.instance_id,
+                        new_instance_status=IMInstance.STOPPING,
+                        details=err_msg,
+                    )
+                )
+        return updates
