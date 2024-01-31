@@ -150,6 +150,7 @@ class CloudProviderReconciler(IReconciler):
         non_terminated_cloud_instances: Dict[CloudInstanceId, CloudInstance],
         cloud_provider_errors: List[CloudInstanceProviderError],
         instances: List[IMInstance],
+        ray_install_needed: bool,
     ) -> List[IMInstanceUpdateEvent]:
         """
         Reconcile the instance storage with the node provider.
@@ -198,6 +199,12 @@ class CloudProviderReconciler(IReconciler):
             cloud_provider_errors,
             instances_by_status[IMInstance.STOPPING],
         )
+
+        if ray_install_needed:
+            updates += CloudProviderReconciler._handle_ray_install(
+                instances_by_status[IMInstance.ALLOCATED],
+                non_terminated_cloud_instances,
+            )
 
         return updates
 
@@ -389,6 +396,27 @@ class CloudProviderReconciler(IReconciler):
                         instance_id=instance.instance_id,
                         new_instance_status=IMInstance.STOPPING,
                         details=err_msg,
+                    )
+                )
+        return updates
+
+    @staticmethod
+    def _handle_ray_install(
+        allocated_instances: List[IMInstance],
+        cloud_instances: Dict[CloudInstanceId, CloudInstance],
+    ) -> List[IMInstanceUpdateEvent]:
+        """
+        For any ALLOCATED instances, if the cloud instance is running and ray
+        installation is required, we will transition the instance to RAY_INSTALLING.
+        """
+        updates = []
+        for instance in allocated_instances:
+            cloud_instance = cloud_instances.get(instance.cloud_instance_id)
+            if cloud_instance and cloud_instance.is_running:
+                updates.append(
+                    IMInstanceUpdateEvent(
+                        instance_id=instance.instance_id,
+                        new_instance_status=IMInstance.RAY_INSTALLING,
                     )
                 )
         return updates
