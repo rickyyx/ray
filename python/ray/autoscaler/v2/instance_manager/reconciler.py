@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class IReconciler(ABC):
     @staticmethod
     @abstractmethod
-    def reconcile(*args, **kwargs) -> Dict[str, IMInstanceUpdateEvent]:
+    def reconcile(*args, **kwargs) -> List[IMInstanceUpdateEvent]:
         """
         Reconcile the status of Instance Manager(IM) instances to a valid state.
         It should yield a list of instance update events that will be applied to the
@@ -32,7 +32,7 @@ class IReconciler(ABC):
         update events. This method is expected to be idempotent and deterministic.
 
         Returns:
-            A dict of instance id to instance update event.
+            A list of instance update event.
 
         """
         pass
@@ -42,7 +42,7 @@ class StuckInstanceReconciler(IReconciler):
     @staticmethod
     def reconcile(
         instances: List[IMInstance],
-    ) -> Dict[str, IMInstanceUpdateEvent]:
+    ) -> List[IMInstanceUpdateEvent]:
         """
         ***********************
         **STUCK STATES
@@ -127,7 +127,7 @@ class RayStateReconciler(IReconciler):
     @staticmethod
     def reconcile(
         ray_cluster_resource_state: ClusterResourceState, instances: List[IMInstance]
-    ) -> Dict[str, IMInstanceUpdateEvent]:
+    ) -> List[IMInstanceUpdateEvent]:
         """
         Reconcile the instances states for Ray node state changes.
 
@@ -147,7 +147,7 @@ class CloudProviderReconciler(IReconciler):
     @staticmethod
     def reconcile(
         provider: ICloudInstanceProvider, instances: List[IMInstance]
-    ) -> Dict[str, IMInstanceUpdateEvent]:
+    ) -> List[IMInstanceUpdateEvent]:
         """
         Reconcile the instance storage with the node provider.
         This is responsible for transitioning the instance status of:
@@ -323,7 +323,7 @@ class CloudProviderReconciler(IReconciler):
     def _handle_stopped(
         instances_with_cloud_instance_assigned: Dict[CloudInstanceId, IMInstance],
         non_terminated_cloud_instance_ids: Set[CloudInstanceId],
-    ) -> Dict[str, IMInstanceUpdateEvent]:
+    ) -> List[IMInstanceUpdateEvent]:
         """
         For any IM (instance manager) instance with a cloud node id, if the mapped
         cloud instance is no longer running, transition the instance to STOPPED.
@@ -339,7 +339,7 @@ class CloudProviderReconciler(IReconciler):
     @staticmethod
     def _reconcile_failed_to_terminate(
         cloud_provider_errors: List[CloudInstanceProviderError],
-    ) -> Dict[str, IMInstanceUpdateEvent]:
+    ) -> List[IMInstanceUpdateEvent]:
         """
         For any STOPPING instances, if there's errors in terminating the cloud instance,
         we will retry the termination by setting it to STOPPING again.
