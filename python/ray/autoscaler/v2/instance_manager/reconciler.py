@@ -1,7 +1,7 @@
 from collections import defaultdict
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from ray.autoscaler.v2.instance_manager.node_provider import (
     CloudInstance,
@@ -165,33 +165,33 @@ class CloudProviderReconciler(IReconciler):
         non_terminated_cloud_instances = provider.get_non_terminated()
         cloud_provider_errors = provider.poll_errors()
         instances_by_status = defaultdict(list)
-        instances_with_cloud_instances_assigned = {}
+        instances_with_cloud_instance_assigned = {}
 
         for instance in instances:
             instances_by_status[instance.status].append(instance)
             if instance.cloud_instance_id:
-                instances_with_cloud_instances_assigned[
+                instances_with_cloud_instance_assigned[
                     instance.cloud_instance_id
                 ] = instance
 
         unassigned_cloud_instances = {
             cloud_instance_id: cloud_instance
             for cloud_instance_id, cloud_instance in non_terminated_cloud_instances.items()
-            if cloud_instance_id not in instances_with_cloud_instances_assigned.keys()
+            if cloud_instance_id not in instances_with_cloud_instance_assigned.keys()
         }
 
         # Reconcile the states.
         updates = {}
         updates.update(
-            CloudProviderReconciler._reconcile_allocation(
+            CloudProviderReconciler._handle_requested(
                 cloud_provider_errors,
                 unassigned_cloud_instances,
                 instances_by_status[IMInstance.REQUESTED],
             )
         )
         updates.update(
-            CloudProviderReconciler._reconcile_stopped(
-                instances_with_cloud_instances_assigned,
+            CloudProviderReconciler._handle_stopped(
+                instances_with_cloud_instance_assigned,
                 non_terminated_cloud_instances.keys(),
             )
         )
@@ -204,7 +204,7 @@ class CloudProviderReconciler(IReconciler):
         return updates
 
     @staticmethod
-    def _reconcile_allocation(
+    def _handle_requested(
         cloud_provider_errors: List[CloudInstanceProviderError],
         unassigned_non_terminated_cloud_instances: Dict[CloudInstanceId, CloudInstance],
         requested_instances: List[IMInstance],
@@ -320,26 +320,9 @@ class CloudProviderReconciler(IReconciler):
         return updates
 
     @staticmethod
-    def _reconcile_failed_to_allocate(
-        self, cloud_provider_errors: List[CloudInstanceProviderError]
-    ) -> Dict[str, IMInstanceUpdateEvent]:
-        """
-        For any REQUESTED instances, if there's errors in allocating the cloud instance,
-        transition the instance to ALLOCATION_FAILED.
-        """
-
-        # Find all requested instances, by launch request id.
-
-        # Find all launch errors by launch request id.
-
-        # For the same request, transition the instance to ALLOCATION_FAILED.
-        # TODO(rickyx): we don't differentiate transient errors (which might be
-        # retryable) and permanent errors (which are not retryable).
-        pass
-
-    @staticmethod
-    def _reconcile_stopped(
-        non_terminated_cloud_nodes: Dict[CloudInstanceId, CloudInstance]
+    def _handle_stopped(
+        instances_with_cloud_instance_assigned: Dict[CloudInstanceId, IMInstance],
+        non_terminated_cloud_instance_ids: Set[CloudInstanceId],
     ) -> Dict[str, IMInstanceUpdateEvent]:
         """
         For any IM (instance manager) instance with a cloud node id, if the mapped
